@@ -1,0 +1,11 @@
+bin/
+obj/
+*.user
+*.suo
+.vs/
+
+# 実行時に exe の隣へ生成される
+sands.config.json
+
+# E2E の出力
+results.txt

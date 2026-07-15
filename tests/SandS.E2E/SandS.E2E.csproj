@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AssemblyName>SandS.E2E</AssemblyName>
+    <RootNamespace>E2E</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 既定設定のコンパイル検証のために Config/Engine を直接触る -->
+    <ProjectReference Include="..\..\SandS\SandS.csproj" />
+  </ItemGroup>
+</Project>
