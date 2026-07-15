@@ -1,4 +1,4 @@
-using System.Windows.Forms;
+
 using static SandS.Native;
 
 namespace SandS;
@@ -14,7 +14,7 @@ internal static unsafe class Sender
         uint flags = down ? 0u : KEYEVENTF_KEYUP;
         if (key.Extended) flags |= KEYEVENTF_EXTENDEDKEY;
 
-        ushort vk = key.Vk;
+        ushort vk = key.Code;
 
         // sc 指定はスキャンコードで送る。仮想キーコードが配列や IME 状態で揺れるキー
         // (sc029 = 半角/全角 など) を、物理位置どおりに届けるため。
@@ -27,9 +27,9 @@ internal static unsafe class Sender
         SendOne(vk, key.Scan, flags);
     }
 
-    public static void Key(Keys vk, bool down)
+    public static void Key(Vk vk, bool down)
     {
-        uint scan = MapVirtualKey((uint)vk, MAPVK_VK_TO_VSC);
+        uint scan = MapVirtualKeyW((uint)vk, MAPVK_VK_TO_VSC);
         uint flags = down ? 0u : KEYEVENTF_KEYUP;
         if (IsExtended(vk)) flags |= KEYEVENTF_EXTENDEDKEY;
         SendOne((ushort)vk, (ushort)scan, flags);
@@ -59,20 +59,20 @@ internal static unsafe class Sender
     {
         var physGroups = ModMask.GroupsOf(physMask);
 
-        Keys* pressed = stackalloc Keys[4];
+        Vk* pressed = stackalloc Vk[4];
         int pressedCount = 0;
 
         // 1) コンボ側の修飾キーを先に押す。
         //    順序が重要。Alt を「単独で押して離した」と Windows に見せるとメニューモードに入り、
         //    後続のキーがメニューに食われて宛先に届かなくなる。先に何か押しておけば単独押しでなくなる。
         //    (ModKeys() を回すとイテレータを確保するので 4 系統べた書き)
-        PressMod(ModGroup.Ctrl, Keys.LControlKey, combo, physGroups, pressed, ref pressedCount);
-        PressMod(ModGroup.Shift, Keys.LShiftKey, combo, physGroups, pressed, ref pressedCount);
-        PressMod(ModGroup.Alt, Keys.LMenu, combo, physGroups, pressed, ref pressedCount);
-        PressMod(ModGroup.Win, Keys.LWin, combo, physGroups, pressed, ref pressedCount);
+        PressMod(ModGroup.Ctrl, Vk.LControlKey, combo, physGroups, pressed, ref pressedCount);
+        PressMod(ModGroup.Shift, Vk.LShiftKey, combo, physGroups, pressed, ref pressedCount);
+        PressMod(ModGroup.Alt, Vk.LMenu, combo, physGroups, pressed, ref pressedCount);
+        PressMod(ModGroup.Win, Vk.LWin, combo, physGroups, pressed, ref pressedCount);
 
         // 2) コンボに含まれない物理修飾キーを外す
-        Keys* released = stackalloc Keys[8];
+        Vk* released = stackalloc Vk[8];
         int releasedCount = 0;
         byte unrestored = 0;
 
@@ -91,8 +91,8 @@ internal static unsafe class Sender
                 if (menuRisk && !masked)
                 {
                     // 単独の Alt/Win 押しを打ち消すためだけの無害な打鍵 (AHK と同じ手)
-                    Key(Keys.LControlKey, down: true);
-                    Key(Keys.LControlKey, down: false);
+                    Key(Vk.LControlKey, down: true);
+                    Key(Vk.LControlKey, down: false);
                     masked = true;
                 }
 
@@ -114,8 +114,8 @@ internal static unsafe class Sender
         return unrestored;
     }
 
-    private static void PressMod(ModGroup group, Keys vk, Combo combo, ModGroup physGroups,
-                                 Keys* pressed, ref int count)
+    private static void PressMod(ModGroup group, Vk vk, Combo combo, ModGroup physGroups,
+                                 Vk* pressed, ref int count)
     {
         if (!combo.Mods.HasFlag(group)) return;
         // Blind のときは、その系統が既に物理的に押されているなら二重に押さない
@@ -139,10 +139,10 @@ internal static unsafe class Sender
         SendInput(1, &input, sizeof(INPUT));
     }
 
-    private static bool IsExtended(Keys vk) => vk
-        is Keys.RControlKey or Keys.RMenu or Keys.LWin or Keys.RWin or Keys.Apps
-        or Keys.Insert or Keys.Delete or Keys.Home or Keys.End
-        or Keys.PageUp or Keys.PageDown
-        or Keys.Left or Keys.Right or Keys.Up or Keys.Down
-        or Keys.NumLock or Keys.Divide or Keys.PrintScreen;
+    private static bool IsExtended(Vk vk) => vk
+        is Vk.RControlKey or Vk.RMenu or Vk.LWin or Vk.RWin or Vk.Apps
+        or Vk.Insert or Vk.Delete or Vk.Home or Vk.End
+        or Vk.PageUp or Vk.PageDown
+        or Vk.Left or Vk.Right or Vk.Up or Vk.Down
+        or Vk.NumLock or Vk.Divide or Vk.PrintScreen;
 }

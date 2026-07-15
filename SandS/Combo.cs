@@ -1,4 +1,4 @@
-using System.Windows.Forms;
+
 
 namespace SandS;
 
@@ -20,24 +20,24 @@ internal enum ModGroup
 internal static class ModMask
 {
     /// <summary>ビット位置と対応する仮想キー。順序がビット番号そのもの。</summary>
-    public static readonly Keys[] Vks =
+    public static readonly Vk[] Vks =
     [
-        Keys.LControlKey, Keys.RControlKey,
-        Keys.LShiftKey, Keys.RShiftKey,
-        Keys.LMenu, Keys.RMenu,
-        Keys.LWin, Keys.RWin,
+        Vk.LControlKey, Vk.RControlKey,
+        Vk.LShiftKey, Vk.RShiftKey,
+        Vk.LMenu, Vk.RMenu,
+        Vk.LWin, Vk.RWin,
     ];
 
-    public static int BitOf(Keys vk) => vk switch
+    public static int BitOf(Vk vk) => vk switch
     {
-        Keys.LControlKey => 0,
-        Keys.RControlKey => 1,
-        Keys.LShiftKey => 2,
-        Keys.RShiftKey => 3,
-        Keys.LMenu => 4,
-        Keys.RMenu => 5,
-        Keys.LWin => 6,
-        Keys.RWin => 7,
+        Vk.LControlKey => 0,
+        Vk.RControlKey => 1,
+        Vk.LShiftKey => 2,
+        Vk.RShiftKey => 3,
+        Vk.LMenu => 4,
+        Vk.RMenu => 5,
+        Vk.LWin => 6,
+        Vk.RWin => 7,
         _ => -1,
     };
 
@@ -110,12 +110,12 @@ internal sealed record Combo(ModGroup Mods, KeySpec Key, bool Blind)
         return true;
     }
 
-    public static ModGroup GroupOf(Keys vk) => vk switch
+    public static ModGroup GroupOf(Vk vk) => vk switch
     {
-        Keys.LControlKey or Keys.RControlKey or Keys.ControlKey => ModGroup.Ctrl,
-        Keys.LShiftKey or Keys.RShiftKey or Keys.ShiftKey => ModGroup.Shift,
-        Keys.LMenu or Keys.RMenu or Keys.Menu => ModGroup.Alt,
-        Keys.LWin or Keys.RWin => ModGroup.Win,
+        Vk.LControlKey or Vk.RControlKey or Vk.ControlKey => ModGroup.Ctrl,
+        Vk.LShiftKey or Vk.RShiftKey or Vk.ShiftKey => ModGroup.Shift,
+        Vk.LMenu or Vk.RMenu or Vk.Menu => ModGroup.Alt,
+        Vk.LWin or Vk.RWin => ModGroup.Win,
         _ => ModGroup.None,
     };
 

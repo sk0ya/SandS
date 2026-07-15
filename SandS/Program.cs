@@ -1,11 +1,9 @@
-using System.Windows.Forms;
-
 namespace SandS;
 
 internal static class Program
 {
     [STAThread]
-    private static void Main(string[] args)
+    private static int Main(string[] args)
     {
         string cfgPath = Config.DefaultPath;
         string mutexName = "Local\\SandS.SingleInstance";
@@ -23,16 +21,12 @@ internal static class Program
         using var mutex = new Mutex(initiallyOwned: true, mutexName, out bool isFirst);
         if (!isFirst)
         {
-            MessageBox.Show("SandS はすでに起動しています。", "SandS",
-                MessageBoxButtons.OK, MessageBoxIcon.Information);
-            return;
+            TrayApp.Info("SandS はすでに起動しています。");
+            return 0;
         }
 
-        ApplicationConfiguration.Initialize();
-
-        var app = new TrayApp(cfgPath);
-        if (!app.Start()) return;
-
-        Application.Run(app);
+        using var app = new TrayApp(cfgPath);
+        if (!app.Start()) return 1;
+        return app.Run();
     }
 }

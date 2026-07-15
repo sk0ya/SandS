@@ -1,63 +1,212 @@
-using System.Diagnostics;
-using System.Drawing;
-using System.Windows.Forms;
+using System.Collections.Concurrent;
+using System.Runtime.InteropServices;
 using Microsoft.Win32;
+using static SandS.Native;
 
 namespace SandS;
 
-internal sealed class TrayApp : ApplicationContext
+/// <summary>
+/// 隠しウィンドウ + タスクトレイ + メッセージループ。
+/// WinForms を参照するとトリミングと NativeAOT が SDK に拒否される (NETSDK1175) ので、
+/// すべて素の Win32 で組んでいる。
+/// </summary>
+internal sealed unsafe class TrayApp : IDisposable
 {
     private const string StartupRegKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string StartupValueName = "SandS";
+    private const uint TrayId = 1;
+
+    private const uint CmdEnabled = 1;
+    private const uint CmdStartup = 2;
+    private const uint CmdReload = 3;
+    private const uint CmdEdit = 4;
+    private const uint CmdExit = 5;
 
     private readonly string _cfgPath;
-    private readonly NotifyIcon _tray;
-    private readonly ToolStripMenuItem _enabledItem;
-    private readonly ToolStripMenuItem _startupItem;
-
+    private IntPtr _hwnd;
+    private IntPtr _iconOn, _iconOff;
     private Engine? _engine;
+    private bool _enabled = true;
 
-    // 有効/無効でしか変わらないので、都度描かずに使い回す
-    private static readonly Icon IconOn = BuildIcon(true);
-    private static readonly Icon IconOff = BuildIcon(false);
+    // GC に回収されるとコールバックが死ぬので、必ずフィールドで保持する
+    private readonly WndProc _wndProc;
+    private IntPtr _wndProcPtr;
+
+    /// <summary>フックから届いたコマンド。フック内で実行すると危険なので、ここを経由して UI スレッドで処理する。</summary>
+    private readonly ConcurrentQueue<string> _commands = new();
 
     public TrayApp(string cfgPath)
     {
         _cfgPath = cfgPath;
-
-        _enabledItem = new ToolStripMenuItem("有効 (&E)") { Checked = true, CheckOnClick = true };
-        _enabledItem.CheckedChanged += (_, _) =>
-        {
-            if (_engine is not null) _engine.Enabled = _enabledItem.Checked;
-            UpdateTrayLook();
-        };
-
-        _startupItem = new ToolStripMenuItem("Windows 起動時に開始 (&S)")
-        {
-            CheckOnClick = true,
-            Checked = IsStartupRegistered(),
-        };
-        _startupItem.CheckedChanged += (_, _) => SetStartup(_startupItem.Checked);
-
-        var menu = new ContextMenuStrip();
-        menu.Items.Add(_enabledItem);
-        menu.Items.Add(_startupItem);
-        menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("設定を再読み込み (&R)", null, (_, _) => Reload());
-        menu.Items.Add("設定ファイルを編集 (&O)", null, (_, _) => EditConfig());
-        menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("終了 (&X)", null, (_, _) => ExitApp());
-
-        _tray = new NotifyIcon { ContextMenuStrip = menu, Visible = true, Icon = IconOn };
-        _tray.DoubleClick += (_, _) => _enabledItem.Checked = !_enabledItem.Checked;
+        _wndProc = WindowProc;
     }
 
-    /// <summary>設定を読んでフックを張る。失敗したら false。</summary>
     public bool Start()
+    {
+        if (!CreateHiddenWindow()) return false;
+
+        _iconOn = IconFactory.Create(true);
+        _iconOff = IconFactory.Create(false);
+
+        if (!LoadEngine(initial: true)) return false;
+
+        AddTrayIcon();
+        return true;
+    }
+
+    public int Run()
+    {
+        while (true)
+        {
+            int r = GetMessageW(out var msg, IntPtr.Zero, 0, 0);
+            if (r == 0) return (int)msg.wParam;   // WM_QUIT
+            if (r == -1) return 1;
+            TranslateMessage(ref msg);
+            DispatchMessageW(ref msg);
+        }
+    }
+
+    // ---- ウィンドウ --------------------------------------------------------
+
+    private bool CreateHiddenWindow()
+    {
+        _wndProcPtr = Marshal.GetFunctionPointerForDelegate(_wndProc);
+        IntPtr hInst = GetModuleHandleW(IntPtr.Zero);
+
+        fixed (char* clsName = "SandS.MessageWindow")
+        {
+            var wc = new WNDCLASSEXW
+            {
+                cbSize = (uint)sizeof(WNDCLASSEXW),
+                lpfnWndProc = _wndProcPtr,
+                hInstance = hInst,
+                lpszClassName = (IntPtr)clsName,
+            };
+
+            if (RegisterClassExW(ref wc) == 0)
+            {
+                Error($"ウィンドウクラスを登録できませんでした (Win32 error {Marshal.GetLastWin32Error()})。");
+                return false;
+            }
+
+            // メッセージ専用ウィンドウ (HWND_MESSAGE) にはしない。
+            // TrackPopupMenu はフォアグラウンドウィンドウを必要とするため。
+            _hwnd = CreateWindowExW(0, (IntPtr)clsName, IntPtr.Zero, 0,
+                                    0, 0, 0, 0, IntPtr.Zero, IntPtr.Zero, hInst, IntPtr.Zero);
+        }
+
+        if (_hwnd == IntPtr.Zero)
+        {
+            Error($"ウィンドウを作成できませんでした (Win32 error {Marshal.GetLastWin32Error()})。");
+            return false;
+        }
+        return true;
+    }
+
+    private IntPtr WindowProc(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam)
+    {
+        switch (msg)
+        {
+            case WM_TRAY:
+                switch ((int)lParam)
+                {
+                    case WM_RBUTTONUP: ShowMenu(); return IntPtr.Zero;
+                    case WM_LBUTTONDBLCLK: SetEnabled(!_enabled); return IntPtr.Zero;
+                }
+                return IntPtr.Zero;
+
+            case WM_RUN_COMMAND:
+                while (_commands.TryDequeue(out var cmd)) HandleCommand(cmd);
+                return IntPtr.Zero;
+
+            case WM_CLOSE:
+                DestroyWindow(hWnd);
+                return IntPtr.Zero;
+
+            case WM_DESTROY:
+                PostQuitMessage(0);
+                return IntPtr.Zero;
+        }
+        return DefWindowProcW(hWnd, msg, wParam, lParam);
+    }
+
+    // ---- トレイ ------------------------------------------------------------
+
+    private void AddTrayIcon()
+    {
+        var nid = NewNid(NIF_MESSAGE | NIF_ICON | NIF_TIP);
+        Shell_NotifyIconW(NIM_ADD, ref nid);
+    }
+
+    private NOTIFYICONDATAW NewNid(uint flags) => new()
+    {
+        cbSize = (uint)Marshal.SizeOf<NOTIFYICONDATAW>(),
+        hWnd = _hwnd,
+        uID = TrayId,
+        uFlags = flags,
+        uCallbackMessage = WM_TRAY,
+        hIcon = _enabled ? _iconOn : _iconOff,
+        szTip = $"SandS — {(_enabled ? "有効" : "停止中")}",
+        szInfo = "",
+        szInfoTitle = "",
+    };
+
+    private void UpdateTray()
+    {
+        var nid = NewNid(NIF_ICON | NIF_TIP);
+        Shell_NotifyIconW(NIM_MODIFY, ref nid);
+    }
+
+    private void Balloon(string text)
+    {
+        var nid = NewNid(NIF_INFO);
+        nid.szInfo = text;
+        nid.szInfoTitle = "SandS";
+        nid.uTimeoutOrVersion = 3000;
+        Shell_NotifyIconW(NIM_MODIFY, ref nid);
+    }
+
+    private void ShowMenu()
+    {
+        IntPtr menu = CreatePopupMenu();
+        AppendMenuW(menu, MF_STRING | (_enabled ? MF_CHECKED : 0), (UIntPtr)CmdEnabled, "有効(&E)");
+        AppendMenuW(menu, MF_STRING | (IsStartupRegistered() ? MF_CHECKED : 0), (UIntPtr)CmdStartup, "Windows 起動時に開始(&S)");
+        AppendMenuW(menu, MF_SEPARATOR, UIntPtr.Zero, "");
+        AppendMenuW(menu, MF_STRING, (UIntPtr)CmdReload, "設定を再読み込み(&R)");
+        AppendMenuW(menu, MF_STRING, (UIntPtr)CmdEdit, "設定ファイルを編集(&O)");
+        AppendMenuW(menu, MF_SEPARATOR, UIntPtr.Zero, "");
+        AppendMenuW(menu, MF_STRING, (UIntPtr)CmdExit, "終了(&X)");
+
+        GetCursorPos(out var pt);
+        // これが無いとメニューの外をクリックしても閉じない (Win32 の既知の作法)
+        SetForegroundWindow(_hwnd);
+        int cmd = TrackPopupMenuEx(menu, TPM_RIGHTBUTTON | TPM_RETURNCMD, pt.x, pt.y, _hwnd, IntPtr.Zero);
+        DestroyMenu(menu);
+
+        switch ((uint)cmd)
+        {
+            case CmdEnabled: SetEnabled(!_enabled); break;
+            case CmdStartup: SetStartup(!IsStartupRegistered()); break;
+            case CmdReload: Reload(); break;
+            case CmdEdit: EditConfig(); break;
+            case CmdExit: DestroyWindow(_hwnd); break;
+        }
+    }
+
+    private void SetEnabled(bool on)
+    {
+        _enabled = on;
+        if (_engine is not null) _engine.Enabled = on;
+        UpdateTray();
+    }
+
+    // ---- 設定 --------------------------------------------------------------
+
+    private bool LoadEngine(bool initial)
     {
         var cfg = Config.Load(_cfgPath, out var problems);
         var engine = new Engine(cfg, problems);
-        engine.OnCommand = HandleCommand;
+        engine.OnCommand = QueueCommand;
 
         try
         {
@@ -65,15 +214,27 @@ internal sealed class TrayApp : ApplicationContext
         }
         catch (Exception ex)
         {
-            MessageBox.Show(ex.Message, "SandS", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            if (initial) Error(ex.Message);
+            else Warn($"設定を再読み込みできませんでした。元の設定のまま続けます。\n\n{ex.Message}");
             return false;
         }
 
+        // 新しいフックを張ってから古い方を外す。逆にすると、その隙間の打鍵が素通しになる。
+        _engine?.Dispose();
         _engine = engine;
-        _engine.Enabled = _enabledItem.Checked;
-        UpdateTrayLook();
-        ReportProblems(problems);
+        _engine.Enabled = _enabled;
+
+        if (problems.Count > 0)
+            Warn("設定に解釈できない箇所があります。該当分だけ無効にして続けます。\n\n" + string.Join("\n", problems));
+
         return true;
+    }
+
+    /// <summary>フックのコールバックから呼ばれる。ここでは重い処理をせず、UI スレッドへ回すだけ。</summary>
+    private void QueueCommand(string cmd)
+    {
+        _commands.Enqueue(cmd);
+        PostMessageW(_hwnd, WM_RUN_COMMAND, IntPtr.Zero, IntPtr.Zero);
     }
 
     private void HandleCommand(string cmd)
@@ -82,110 +243,37 @@ internal sealed class TrayApp : ApplicationContext
         {
             case "@reload": Reload(); break;
             case "@edit": EditConfig(); break;
-            case "@toggle": _enabledItem.Checked = !_enabledItem.Checked; break;
-            case "@exit": ExitApp(); break;
-            default:
-                _tray.ShowBalloonTip(4000, "SandS", $"知らないコマンドです: {cmd}", ToolTipIcon.Warning);
-                break;
+            case "@toggle": SetEnabled(!_enabled); break;
+            case "@exit": DestroyWindow(_hwnd); break;
+            default: Balloon($"知らないコマンドです: {cmd}"); break;
         }
     }
 
     private void Reload()
     {
-        var cfg = Config.Load(_cfgPath, out var problems);
-        var engine = new Engine(cfg, problems);
-        engine.OnCommand = HandleCommand;
-
-        // 新しいフックを張ってから古い方を外す。逆にすると、その隙間の打鍵が素通しになる。
-        try
+        if (LoadEngine(initial: false))
         {
-            engine.Install();
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show($"設定を再読み込みできませんでした。元の設定のまま続けます。\n\n{ex.Message}",
-                "SandS", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            return;
-        }
-
-        _engine?.Dispose();
-        _engine = engine;
-        _engine.Enabled = _enabledItem.Checked;
-
-        UpdateTrayLook();
-        ReportProblems(problems);
-        if (problems.Count == 0)
-            _tray.ShowBalloonTip(2000, "SandS", "設定を再読み込みしました。", ToolTipIcon.Info);
-    }
-
-    private void ReportProblems(List<string> problems)
-    {
-        if (problems.Count == 0) return;
-        MessageBox.Show(
-            "設定に解釈できない箇所があります。該当分だけ無効にして続けます。\n\n" +
-            string.Join("\n", problems),
-            "SandS", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-    }
-
-    private void UpdateTrayLook()
-    {
-        bool on = _engine?.Enabled ?? false;
-        _tray.Icon = on ? IconOn : IconOff;
-        _tray.Text = $"SandS — {(on ? "有効" : "停止中")}";
-    }
-
-    /// <summary>外部アイコンファイルを持たずに済むよう、トレイアイコンをその場で描く。</summary>
-    private static Icon BuildIcon(bool enabled)
-    {
-        using var bmp = new Bitmap(32, 32);
-        using (var g = Graphics.FromImage(bmp))
-        {
-            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-            g.Clear(Color.Transparent);
-
-            using var fill = new SolidBrush(enabled
-                ? Color.FromArgb(0x2E, 0x7D, 0x32)
-                : Color.FromArgb(0x75, 0x75, 0x75));
-            g.FillRectangle(fill, 2, 9, 28, 14);
-
-            using var font = new Font("Segoe UI", 9f, FontStyle.Bold, GraphicsUnit.Pixel);
-            using var fg = new SolidBrush(Color.White);
-            using var fmt = new StringFormat
-            {
-                Alignment = StringAlignment.Center,
-                LineAlignment = StringAlignment.Center,
-            };
-            g.DrawString("S&S", font, fg, new RectangleF(2, 9, 28, 14), fmt);
-        }
-
-        IntPtr h = bmp.GetHicon();
-        try
-        {
-            // FromHandle はハンドルを所有しないので、複製してから元を破棄する
-            using var tmp = Icon.FromHandle(h);
-            return (Icon)tmp.Clone();
-        }
-        finally
-        {
-            Native.DestroyIcon(h);
+            UpdateTray();
+            Balloon("設定を再読み込みしました。");
         }
     }
 
     private void EditConfig()
     {
-        try
+        if (!File.Exists(_cfgPath))
         {
-            if (!File.Exists(_cfgPath)) Config.Default().Save(_cfgPath);
-            Process.Start(new ProcessStartInfo(_cfgPath) { UseShellExecute = true });
-            _tray.ShowBalloonTip(4000, "SandS",
-                "保存したら「設定を再読み込み」(または BackSpace+R) で反映されます。", ToolTipIcon.Info);
+            try { Config.Default().Save(_cfgPath); }
+            catch (Exception ex) { Warn($"設定ファイルを作成できませんでした。\n{_cfgPath}\n\n{ex.Message}"); return; }
         }
-        catch (Exception ex)
-        {
-            MessageBox.Show($"設定ファイルを開けませんでした。\n{_cfgPath}\n\n{ex.Message}",
-                "SandS", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-        }
+
+        IntPtr r = ShellExecuteW(IntPtr.Zero, "open", _cfgPath, null, null, SW_SHOWNORMAL);
+        if ((long)r <= 32)
+            Warn($"設定ファイルを開けませんでした。\n{_cfgPath}");
+        else
+            Balloon("保存したら「設定を再読み込み」(または BackSpace+R) で反映されます。");
     }
+
+    // ---- スタートアップ ----------------------------------------------------
 
     private static bool IsStartupRegistered()
     {
@@ -204,26 +292,23 @@ internal sealed class TrayApp : ApplicationContext
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"スタートアップ設定を変更できませんでした。\n\n{ex.Message}",
-                "SandS", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            _startupItem.Checked = IsStartupRegistered();
+            Warn($"スタートアップ設定を変更できませんでした。\n\n{ex.Message}");
         }
     }
 
-    private void ExitApp()
-    {
-        _tray.Visible = false;
-        _engine?.Uninstall();
-        ExitThread();
-    }
+    // ---- ダイアログ --------------------------------------------------------
 
-    protected override void Dispose(bool disposing)
+    public static void Error(string msg) => MessageBoxW(IntPtr.Zero, msg, "SandS", MB_OK | MB_ICONERROR);
+    public static void Warn(string msg) => MessageBoxW(IntPtr.Zero, msg, "SandS", MB_OK | MB_ICONWARNING);
+    public static void Info(string msg) => MessageBoxW(IntPtr.Zero, msg, "SandS", MB_OK | MB_ICONINFORMATION);
+
+    public void Dispose()
     {
-        if (disposing)
-        {
-            _tray.Dispose();
-            _engine?.Dispose();
-        }
-        base.Dispose(disposing);
+        var nid = NewNid(0);
+        Shell_NotifyIconW(NIM_DELETE, ref nid);
+
+        _engine?.Dispose();
+        if (_iconOn != IntPtr.Zero) DestroyIcon(_iconOn);
+        if (_iconOff != IntPtr.Zero) DestroyIcon(_iconOff);
     }
 }
