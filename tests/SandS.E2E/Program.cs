@@ -87,8 +87,13 @@ internal static class Program
         ? "(何も来なかった)"
         : string.Join(", ", Hits.Select(h => h.Mods == Keys.None ? $"{h.Code}" : $"{h.Mods}+{h.Code}"));
 
-    /// <summary>テスト用設定。実設定と違い、発火しても害のないキーだけを割り当てる。</summary>
-    static string TestConfigJson() => JsonSerializer.Serialize(new
+    static string _cfgPath = "";
+
+    /// <summary>
+    /// テスト用設定。実設定と違い、発火しても害のないキーだけを割り当てる。
+    /// oneKey は Enter+1 の割り当て。再読み込みが効いたかを見るために差し替える。
+    /// </summary>
+    static string TestConfigJson(string oneKey = "^F13") => JsonSerializer.Serialize(new
     {
         PrefixKeys = new object[]
         {
@@ -125,8 +130,11 @@ internal static class Program
                 {
                     // 実設定は Win+1 だが、発火するとタスクバー切替が起きてテストが壊れる。
                     // 修飾キー付きコンボの送出経路は F13/F14 で確認する。
-                    ["1"] = "^F13",
+                    ["1"] = oneKey,
                     ["h"] = "+F14",
+                    // @reload はコマンド経路 (フック → UI スレッド) の疎通確認用。
+                    // 実設定の BackSpace+R と同じ仕組みで、設定を読み直すだけなので無害。
+                    ["z"] = "@reload",
                 },
                 TapTimeoutMs = 0,
             },
@@ -145,6 +153,16 @@ internal static class Program
         // ---- Part 1: 実設定 (既定値) がそのままコンパイルできるか ----
         // Win+1 / Alt+F4 などは実挙動を試せないので、せめてキー名とコンボが
         // 全て解釈できることをここで担保する。
+        //
+        // ここは C# 実装の内部を直接叩くので、SANDS_EXE で別実装 (Rust 版) を
+        // 対象にしているときは意味がない。その場合は cargo test が同等を受け持つ。
+        if (Environment.GetEnvironmentVariable("SANDS_EXE") is not null)
+        {
+            Log.AppendLine("SKIP  Part 1 (C# 実装の内部検証。別実装が対象なので cargo test が担当)\n");
+            RunPart2();
+            return;
+        }
+
         var problems = new List<string>();
         var real = Config.Default();
         _ = new Engine(real, problems);
@@ -162,14 +180,20 @@ internal static class Program
               "有効/停止の両方でハンドルが取れる", $"on=0x{on:X} off=0x{off:X}");
 
         TestStartup();
+        RunPart2();
+    }
 
-        // ---- Part 2: テスト用設定で実挙動 ----
+    /// <summary>exe をブラックボックスとして起動し、実際に届いたキーを観測する。実装言語に依存しない。</summary>
+    static void RunPart2()
+    {
         string cfgPath = Path.Combine(Path.GetTempPath(), "sands.e2e.config.json");
+        _cfgPath = cfgPath;
         File.WriteAllText(cfgPath, TestConfigJson());
 
-        // NativeAOT で publish した exe が本番の成果物なので、あればそちらを優先して検証する。
+        // Part 2 は exe をブラックボックスとして観測するだけなので実装言語に依存しない。
+        // SANDS_EXE で対象を差し替えられるようにしてある (Rust 版と C# 版を同じ検証にかけるため)。
         string root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, @"..\..\..\..\..\SandS\bin\Release\net9.0-windows\win-x64"));
-        string exe = Path.Combine(root, "publish", "SandS.exe");
+        string exe = Environment.GetEnvironmentVariable("SANDS_EXE") ?? Path.Combine(root, "publish", "SandS.exe");
         if (!File.Exists(exe)) exe = Path.Combine(root, "SandS.exe");
         if (!File.Exists(exe))
         {
@@ -394,6 +418,25 @@ internal static class Program
         await Tap(Keys.A); await Tap(Keys.B);
         await Task.Delay(300);
         Check("普通のタイプが壊れていない", box.Text == "ab", Q("ab"), Q(box.Text));
+
+        // --- コマンド経路 (@reload) ---
+        // フックはコマンドを積むだけで、UI スレッドへ通知しないと誰も拾わない。
+        // 設定を書き換えてから @reload を撃ち、割り当てが変わることで疎通を確かめる。
+        // (これが繋がっていないと、実設定の BackSpace+R / BackSpace+E が無反応になる)
+        File.WriteAllText(_cfgPath, TestConfigJson(oneKey: "^F17"));
+        await Reset(box);
+        Key(Keys.Enter, true); await Task.Delay(40);
+        await Tap(Keys.Z);                       // z → @reload
+        Key(Keys.Enter, false);
+        await Task.Delay(900);                   // 再読み込みとバルーン表示を待つ
+
+        await Reset(box);
+        Key(Keys.Enter, true); await Task.Delay(40);
+        await Tap(Keys.D1);
+        Key(Keys.Enter, false); await Task.Delay(300);
+        Check("@reload が効き、Enter+1 が Ctrl+F13 → Ctrl+F17 に変わる",
+              Hits.Any(h => h.Code == Keys.F17 && h.Mods == Keys.Control),
+              "Control+F17 を含む", HitsText());
     }
 
     static void Finish()

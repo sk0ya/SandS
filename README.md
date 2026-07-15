@@ -1,7 +1,20 @@
 # SandS
 
-AutoHotkey の SandS + 周辺のキーカスタマイズをまとめて置き換える常駐ソフト。C# / .NET 9 / Windows。
+AutoHotkey の SandS + 周辺のキーカスタマイズをまとめて置き換える常駐ソフト。Windows 専用。
 タスクトレイに常駐し、右クリックで有効/無効・設定の再読み込み・スタートアップ登録ができます。
+
+**実装が 2 つあります。**
+
+| | `sands-rs/` (Rust) | `SandS/` (C# NativeAOT) |
+| --- | --- | --- |
+| exe | **0.28 MB** | 2.07 MB |
+| Working Set | **8.2 MB** | 10.9 MB |
+| Private | **1.5 MB** | 4.3 MB |
+| スレッド | **4** | 5 |
+| ビルドに要るもの | Rust + MSVC リンカ | .NET 9 SDK + VS C++ ビルドツール |
+
+挙動と設定ファイルは同一で、**同じ E2E テストの両方を通しています**。
+Rust 版が本命で、C# 版は移植元として残してあります。
 
 扱う機能は 3 つです。
 
@@ -11,7 +24,18 @@ AutoHotkey の SandS + 周辺のキーカスタマイズをまとめて置き換
 | ホットキー | `Alt+;` → `Ctrl+F12` | `!sc027::Send "^{F12}"` |
 | 単純リマップ | カタカナ/ひらがな → 半角/全角 | `sc070::Send "{sc029}"` |
 
-## ビルドと実行
+## ビルドと実行 (Rust 版)
+
+```
+cd sands-rs
+cargo build --release
+target\release\sands.exe
+```
+
+`cargo test` がパーサ・設定・アイコン・タスク XML を検証します
+(実キー挙動は下記の E2E が受け持ちます)。
+
+## ビルドと実行 (C# 版)
 
 成果物は **NativeAOT でビルドした単一ネイティブ exe (約 2MB)** です。.NET ランタイムの導入は要りません。
 
@@ -159,14 +183,22 @@ dotnet build tests\SandS.E2E\SandS.E2E.csproj -c Release
 tests\SandS.E2E\bin\Release\net9.0-windows\SandS.E2E.exe   # 結果は results.txt へ
 ```
 
-SandS.exe の起動と終了はテスト側が行います。publish 済みの AOT exe があればそちらを、
-無ければ `dotnet build` の出力を対象にします。
+exe の起動と終了はテスト側が行います。
 **他のキーカスタマイズソフトを止めてから実行してください** (掴み合いで結果が壊れます)。
+
+Part 2 は exe をブラックボックスとして観測するだけなので**実装言語に依存しません**。
+`SANDS_EXE` で対象を差し替えると、Rust 版を同じ検証にかけられます。
+
+```powershell
+$env:SANDS_EXE = "C:\Projects\HotKey\sands-rs\target\release\sands.exe"
+tests\SandS.E2E\bin\Release\net9.0-windows\SandS.E2E.exe
+```
 
 テストは 2 部構成です。
 
 - **Part 1**: 既定設定 (= 元の AHK スクリプト) が警告ゼロでコンパイルできること、
-  トレイアイコンが GDI で生成できることの検証。
+  トレイアイコンが生成できること、タスク XML が妥当なこと、スタートアップ登録の検証。
+  C# 実装の内部を直接叩くので、`SANDS_EXE` 指定時は飛ばします (Rust 版では `cargo test` が同等を担当)。
 - **Part 2**: 無害なキーだけを割り当てたテスト用設定での実挙動検証。
   実設定の `Win+1` / `Alt+F4` / `Ctrl+Win+F4` などは、テスト中に発火させるとウィンドウが飛んで
   テスト自体が壊れるため、実挙動としては流していません (修飾キー付きコンボの送出経路は
