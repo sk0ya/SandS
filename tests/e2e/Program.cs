@@ -158,7 +158,7 @@ internal static class Program
         // SANDS_EXE で対象を差し替えられる。既定は cargo build --release の出力。
         string exe = Environment.GetEnvironmentVariable("SANDS_EXE")
             ?? Path.GetFullPath(Path.Combine(AppContext.BaseDirectory,
-                   @"..\..\..\..\..\sands\target\release\sands.exe"));
+                   @"..\..\..\..\..\target\release\sands.exe"));
         if (!File.Exists(exe))
         {
             Log.AppendLine($"FAIL  sands.exe が見つからない: {exe}\n      先に cargo build --release を実行してください。");
