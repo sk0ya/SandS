@@ -3,17 +3,18 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Windows.Forms;
-using SandS;
 
 namespace E2E;
 
 /// <summary>
-/// SandS.exe を別プロセスで常駐させ、物理キー相当の入力 (dwExtraInfo = 0) を SendInput で
+/// sands.exe を別プロセスで常駐させ、物理キー相当の入力 (dwExtraInfo = 0) を SendInput で
 /// 流し込んで、実際にコントロールへ届いたものを観測する。
+///
+/// アプリ本体への参照は持たない。ブラックボックスとして観測するだけなので実装言語に依存しない。
+/// パーサや設定の内部検証は sands の cargo test が受け持つ。
 ///
 /// 実設定の Win+1 / Alt+F4 / Ctrl+Win+F4 などはテスト中に発火させるとウィンドウが飛んで
 /// テスト自体が壊れるので、ここでは無害なキーだけを割り当てたテスト用設定を使う。
-/// 実設定は Part 1 でコンパイル検証だけ行う。
 /// </summary>
 internal static class Program
 {
@@ -87,8 +88,13 @@ internal static class Program
         ? "(何も来なかった)"
         : string.Join(", ", Hits.Select(h => h.Mods == Keys.None ? $"{h.Code}" : $"{h.Mods}+{h.Code}"));
 
-    /// <summary>テスト用設定。実設定と違い、発火しても害のないキーだけを割り当てる。</summary>
-    static string TestConfigJson() => JsonSerializer.Serialize(new
+    static string _cfgPath = "";
+
+    /// <summary>
+    /// テスト用設定。実設定と違い、発火しても害のないキーだけを割り当てる。
+    /// oneKey は Enter+1 の割り当て。再読み込みが効いたかを見るために差し替える。
+    /// </summary>
+    static string TestConfigJson(string oneKey = "^F13") => JsonSerializer.Serialize(new
     {
         PrefixKeys = new object[]
         {
@@ -125,8 +131,11 @@ internal static class Program
                 {
                     // 実設定は Win+1 だが、発火するとタスクバー切替が起きてテストが壊れる。
                     // 修飾キー付きコンボの送出経路は F13/F14 で確認する。
-                    ["1"] = "^F13",
+                    ["1"] = oneKey,
                     ["h"] = "+F14",
+                    // @reload はコマンド経路 (フック → UI スレッド) の疎通確認用。
+                    // 実設定の BackSpace+R と同じ仕組みで、設定を読み直すだけなので無害。
+                    ["z"] = "@reload",
                 },
                 TapTimeoutMs = 0,
             },
@@ -142,38 +151,17 @@ internal static class Program
     [STAThread]
     static void Main()
     {
-        // ---- Part 1: 実設定 (既定値) がそのままコンパイルできるか ----
-        // Win+1 / Alt+F4 などは実挙動を試せないので、せめてキー名とコンボが
-        // 全て解釈できることをここで担保する。
-        var problems = new List<string>();
-        var real = Config.Default();
-        _ = new Engine(real, problems);
-        Check("既定設定 (元の AHK スクリプト) が警告なしでコンパイルできる",
-              problems.Count == 0, "問題なし", problems.Count == 0 ? "問題なし" : string.Join(" / ", problems));
-
-        int mapped = real.PrefixKeys.Sum(p => p.Map.Count) + real.Hotkeys.Count;
-        Check("既定設定の割り当て数", mapped >= 35, ">=35", mapped.ToString());
-
-        // トレイアイコンは System.Drawing を捨てて GDI へのピクセル直描きに置き換えたので、
-        // 失敗しても「無地のアイコンが出る」だけで気づけない。ハンドルが取れるかを見ておく。
-        IntPtr on = IconFactory.Create(true);
-        IntPtr off = IconFactory.Create(false);
-        Check("トレイアイコンを GDI で生成できる", on != IntPtr.Zero && off != IntPtr.Zero,
-              "有効/停止の両方でハンドルが取れる", $"on=0x{on:X} off=0x{off:X}");
-
-        TestStartup();
-
-        // ---- Part 2: テスト用設定で実挙動 ----
         string cfgPath = Path.Combine(Path.GetTempPath(), "sands.e2e.config.json");
+        _cfgPath = cfgPath;
         File.WriteAllText(cfgPath, TestConfigJson());
 
-        // NativeAOT で publish した exe が本番の成果物なので、あればそちらを優先して検証する。
-        string root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, @"..\..\..\..\..\SandS\bin\Release\net9.0-windows\win-x64"));
-        string exe = Path.Combine(root, "publish", "SandS.exe");
-        if (!File.Exists(exe)) exe = Path.Combine(root, "SandS.exe");
+        // SANDS_EXE で対象を差し替えられる。既定は cargo build --release の出力。
+        string exe = Environment.GetEnvironmentVariable("SANDS_EXE")
+            ?? Path.GetFullPath(Path.Combine(AppContext.BaseDirectory,
+                   @"..\..\..\..\..\sands\target\release\sands.exe"));
         if (!File.Exists(exe))
         {
-            Log.AppendLine($"FAIL  SandS.exe が見つからない: {root}");
+            Log.AppendLine($"FAIL  sands.exe が見つからない: {exe}\n      先に cargo build --release を実行してください。");
             _fail++;
             Finish();
             return;
@@ -207,54 +195,6 @@ internal static class Program
         };
 
         Application.Run(form);
-    }
-
-    /// <summary>
-    /// スタートアップ登録。ユーザーのレジストリを触るので、必ず元の状態へ戻す。
-    /// 既に登録済みの環境では、その設定を壊さないよう検証を飛ばす。
-    /// </summary>
-    static void TestStartup()
-    {
-        // タスク XML が壊れていても schtasks のエラーになるだけで原因が分かりにくいので、
-        // 少なくとも XML として妥当であることは見ておく。
-        try
-        {
-            var doc = System.Xml.Linq.XDocument.Parse(Startup.TaskXml(@"C:\dummy\SandS.exe"));
-            var ns = (System.Xml.Linq.XNamespace)"http://schemas.microsoft.com/windows/2004/02/mit/task";
-            string? runLevel = doc.Descendants(ns + "RunLevel").FirstOrDefault()?.Value;
-            string? command = doc.Descendants(ns + "Command").FirstOrDefault()?.Value;
-            Check("タスク XML が妥当で、最上位の特権で起動する指定になっている",
-                  runLevel == "HighestAvailable" && command == @"C:\dummy\SandS.exe",
-                  "RunLevel=HighestAvailable, Command=exe パス", $"RunLevel={runLevel}, Command={command}");
-        }
-        catch (Exception ex)
-        {
-            Check("タスク XML が妥当で、最上位の特権で起動する指定になっている", false, "XML として解析できる", ex.Message);
-        }
-
-        var before = Startup.Current();
-        if (before != StartupMode.None)
-        {
-            Log.AppendLine($"SKIP  スタートアップ登録の実地検証 (既に {before} で登録済みなので触らない)");
-            return;
-        }
-
-        bool elevated = Startup.IsElevated();
-        try
-        {
-            var mode = Startup.Enable(out _);
-            // 非昇格ならタスクは作れないので HKCU\Run になるはず
-            var expected = elevated ? StartupMode.Task : StartupMode.Registry;
-            Check($"スタートアップ登録 (昇格={elevated})", mode == expected, expected.ToString(), mode.ToString());
-            Check("登録後に Current() が拾える", Startup.Current() == expected, expected.ToString(), Startup.Current().ToString());
-        }
-        finally
-        {
-            Startup.Disable(out _);
-        }
-
-        Check("解除するとレジストリもタスクも残らない", Startup.Current() == StartupMode.None,
-              "None", Startup.Current().ToString());
     }
 
     static async Task Reset(TextBox box)
@@ -394,6 +334,25 @@ internal static class Program
         await Tap(Keys.A); await Tap(Keys.B);
         await Task.Delay(300);
         Check("普通のタイプが壊れていない", box.Text == "ab", Q("ab"), Q(box.Text));
+
+        // --- コマンド経路 (@reload) ---
+        // フックはコマンドを積むだけで、UI スレッドへ通知しないと誰も拾わない。
+        // 設定を書き換えてから @reload を撃ち、割り当てが変わることで疎通を確かめる。
+        // (これが繋がっていないと、実設定の BackSpace+R / BackSpace+E が無反応になる)
+        File.WriteAllText(_cfgPath, TestConfigJson(oneKey: "^F17"));
+        await Reset(box);
+        Key(Keys.Enter, true); await Task.Delay(40);
+        await Tap(Keys.Z);                       // z → @reload
+        Key(Keys.Enter, false);
+        await Task.Delay(900);                   // 再読み込みとバルーン表示を待つ
+
+        await Reset(box);
+        Key(Keys.Enter, true); await Task.Delay(40);
+        await Tap(Keys.D1);
+        Key(Keys.Enter, false); await Task.Delay(300);
+        Check("@reload が効き、Enter+1 が Ctrl+F13 → Ctrl+F17 に変わる",
+              Hits.Any(h => h.Code == Keys.F17 && h.Mods == Keys.Control),
+              "Control+F17 を含む", HitsText());
     }
 
     static void Finish()

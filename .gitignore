@@ -4,6 +4,9 @@ obj/
 *.suo
 .vs/
 
+# Rust
+target/
+
 # 実行時に exe の隣へ生成される
 sands.config.json
 
