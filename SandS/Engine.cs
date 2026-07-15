@@ -1,6 +1,6 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
-using System.Windows.Forms;
+
 using static SandS.Native;
 
 namespace SandS;
@@ -11,7 +11,7 @@ internal sealed class CompiledPrefix
 {
     public required KeySpec Key { get; init; }
     public Combo? Tap { get; init; }
-    public Keys? HoldModifier { get; init; }
+    public Vk? HoldModifier { get; init; }
     /// <summary>件数が少ないので線形走査。Dictionary だとスキャンコード指定との併用が面倒なだけ。</summary>
     public Binding[] Map { get; init; } = [];
 
@@ -43,14 +43,13 @@ internal sealed class Engine : IDisposable
     // GC でデリゲートが回収されるとフックが死ぬので、必ずフィールドで保持する
     private readonly HookProc _proc;
     private IntPtr _hook = IntPtr.Zero;
-    private SynchronizationContext? _ui;
 
     private CompiledPrefix? _active;
     private bool _activeUsed;
     private long _activeDownAt;
 
     /// <summary>注入した HoldModifier。押した本体を持っておかないと確実に離せない。</summary>
-    private Keys? _holdModKey;
+    private Vk? _holdModKey;
 
     /// <summary>いま物理的に押されている修飾キーのビットマスク。Blind でない送出で外して戻すために必要。</summary>
     private byte _physMask;
@@ -104,10 +103,10 @@ internal sealed class Engine : IDisposable
             if (p.Tap is not null && !Combo.TryParse(p.Tap, out tap, out var tapErr))
                 problems.Add($"{p.Key}.Tap \"{p.Tap}\": {tapErr}");
 
-            Keys? holdMod = null;
+            Vk? holdMod = null;
             if (p.HoldModifier is not null)
             {
-                if (KeySpec.TryParse(p.HoldModifier, out var hm)) holdMod = (Keys)hm.Vk;
+                if (KeySpec.TryParse(p.HoldModifier, out var hm)) holdMod = (Vk)hm.Code;
                 else problems.Add($"{p.Key}.HoldModifier \"{p.HoldModifier}\" を解釈できません。");
             }
 
@@ -164,8 +163,8 @@ internal sealed class Engine : IDisposable
     public void Install()
     {
         if (_hook != IntPtr.Zero) return;
-        _ui = SynchronizationContext.Current;
-        _hook = SetWindowsHookEx(WH_KEYBOARD_LL, _proc, GetModuleHandle(null), 0);
+        _hook = SetWindowsHookExW(WH_KEYBOARD_LL, Marshal.GetFunctionPointerForDelegate(_proc),
+                                  GetModuleHandleW(IntPtr.Zero), 0);
         DebugLog.Write($"Install: hook=0x{_hook:X} prefixes={_prefixes.Count} hotkeys={_hotkeys.Count}");
         if (_hook == IntPtr.Zero)
             throw new InvalidOperationException(
@@ -216,7 +215,7 @@ internal sealed class Engine : IDisposable
 
         // 打鍵ごとに走る。ログ無効時に文字列を組み立てないよう必ず Enabled で括る。
         if (DebugLog.Enabled)
-            DebugLog.Write($"hook msg=0x{(int)wParam:X} vk={(Keys)info.vkCode} scan={info.scanCode} extra=0x{(ulong)info.dwExtraInfo:X}");
+            DebugLog.Write($"hook msg=0x{(int)wParam:X} vk={(Vk)info.vkCode} scan={info.scanCode} extra=0x{(ulong)info.dwExtraInfo:X}");
 
         // 自分が送ったイベントは触らない (無限ループ防止)
         if (info.dwExtraInfo == InjectedTag) return CallNextHookEx(_hook, nCode, wParam, lParam);
@@ -227,7 +226,7 @@ internal sealed class Engine : IDisposable
         bool isUp = msg is WM_KEYUP or WM_SYSKEYUP;
 
         // 物理修飾キーの追跡は握り潰しより先。ここを取りこぼすと Blind の判定が狂う。
-        int bit = ModMask.BitOf((Keys)info.vkCode);
+        int bit = ModMask.BitOf((Vk)info.vkCode);
         if (bit >= 0)
         {
             if (isDown) _physMask |= (byte)(1 << bit);
@@ -251,7 +250,7 @@ internal sealed class Engine : IDisposable
 
     private IntPtr OnDown(in KBDLLHOOKSTRUCT info, int nCode, IntPtr wParam, IntPtr lParam)
     {
-        var vk = (Keys)info.vkCode;
+        var vk = (Vk)info.vkCode;
 
         if (_active is not null)
         {
@@ -336,9 +335,9 @@ internal sealed class Engine : IDisposable
     {
         if (b.Command is not null)
         {
-            var cmd = b.Command;
-            // フックの中で設定再読込やダイアログを走らせない (LowLevelHooksTimeout で殺される)
-            _ui?.Post(_ => OnCommand?.Invoke(cmd), null);
+            // OnCommand の実体は PostMessage するだけ。フックの中で設定再読込や
+            // ダイアログを走らせると LowLevelHooksTimeout でフックごと殺される。
+            OnCommand?.Invoke(b.Command);
             return;
         }
         if (b.Combo is not null)
@@ -356,7 +355,7 @@ internal sealed class Engine : IDisposable
         {
             if ((unrestored & (1 << bit)) == 0) continue;
             _physMask &= (byte)~(1 << bit);
-            SwallowAdd((ushort)MapVirtualKey((uint)ModMask.Vks[bit], MAPVK_VK_TO_VSC));
+            SwallowAdd((ushort)MapVirtualKeyW((uint)ModMask.Vks[bit], MAPVK_VK_TO_VSC));
         }
     }
 

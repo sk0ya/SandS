@@ -154,19 +154,31 @@ internal static class Program
         int mapped = real.PrefixKeys.Sum(p => p.Map.Count) + real.Hotkeys.Count;
         Check("既定設定の割り当て数", mapped >= 35, ">=35", mapped.ToString());
 
+        // トレイアイコンは System.Drawing を捨てて GDI へのピクセル直描きに置き換えたので、
+        // 失敗しても「無地のアイコンが出る」だけで気づけない。ハンドルが取れるかを見ておく。
+        IntPtr on = IconFactory.Create(true);
+        IntPtr off = IconFactory.Create(false);
+        Check("トレイアイコンを GDI で生成できる", on != IntPtr.Zero && off != IntPtr.Zero,
+              "有効/停止の両方でハンドルが取れる", $"on=0x{on:X} off=0x{off:X}");
+
+        TestStartup();
+
         // ---- Part 2: テスト用設定で実挙動 ----
         string cfgPath = Path.Combine(Path.GetTempPath(), "sands.e2e.config.json");
         File.WriteAllText(cfgPath, TestConfigJson());
 
-        string exe = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory,
-            @"..\..\..\..\..\SandS\bin\Release\net9.0-windows\win-x64\SandS.exe"));
+        // NativeAOT で publish した exe が本番の成果物なので、あればそちらを優先して検証する。
+        string root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, @"..\..\..\..\..\SandS\bin\Release\net9.0-windows\win-x64"));
+        string exe = Path.Combine(root, "publish", "SandS.exe");
+        if (!File.Exists(exe)) exe = Path.Combine(root, "SandS.exe");
         if (!File.Exists(exe))
         {
-            Log.AppendLine($"FAIL  SandS.exe が見つからない: {exe}");
+            Log.AppendLine($"FAIL  SandS.exe が見つからない: {root}");
             _fail++;
             Finish();
             return;
         }
+        Log.AppendLine($"対象: {exe}\n");
 
         var sands = Process.Start(new ProcessStartInfo(exe, $"--config \"{cfgPath}\"") { UseShellExecute = true });
         Thread.Sleep(1500);
@@ -195,6 +207,54 @@ internal static class Program
         };
 
         Application.Run(form);
+    }
+
+    /// <summary>
+    /// スタートアップ登録。ユーザーのレジストリを触るので、必ず元の状態へ戻す。
+    /// 既に登録済みの環境では、その設定を壊さないよう検証を飛ばす。
+    /// </summary>
+    static void TestStartup()
+    {
+        // タスク XML が壊れていても schtasks のエラーになるだけで原因が分かりにくいので、
+        // 少なくとも XML として妥当であることは見ておく。
+        try
+        {
+            var doc = System.Xml.Linq.XDocument.Parse(Startup.TaskXml(@"C:\dummy\SandS.exe"));
+            var ns = (System.Xml.Linq.XNamespace)"http://schemas.microsoft.com/windows/2004/02/mit/task";
+            string? runLevel = doc.Descendants(ns + "RunLevel").FirstOrDefault()?.Value;
+            string? command = doc.Descendants(ns + "Command").FirstOrDefault()?.Value;
+            Check("タスク XML が妥当で、最上位の特権で起動する指定になっている",
+                  runLevel == "HighestAvailable" && command == @"C:\dummy\SandS.exe",
+                  "RunLevel=HighestAvailable, Command=exe パス", $"RunLevel={runLevel}, Command={command}");
+        }
+        catch (Exception ex)
+        {
+            Check("タスク XML が妥当で、最上位の特権で起動する指定になっている", false, "XML として解析できる", ex.Message);
+        }
+
+        var before = Startup.Current();
+        if (before != StartupMode.None)
+        {
+            Log.AppendLine($"SKIP  スタートアップ登録の実地検証 (既に {before} で登録済みなので触らない)");
+            return;
+        }
+
+        bool elevated = Startup.IsElevated();
+        try
+        {
+            var mode = Startup.Enable(out _);
+            // 非昇格ならタスクは作れないので HKCU\Run になるはず
+            var expected = elevated ? StartupMode.Task : StartupMode.Registry;
+            Check($"スタートアップ登録 (昇格={elevated})", mode == expected, expected.ToString(), mode.ToString());
+            Check("登録後に Current() が拾える", Startup.Current() == expected, expected.ToString(), Startup.Current().ToString());
+        }
+        finally
+        {
+            Startup.Disable(out _);
+        }
+
+        Check("解除するとレジストリもタスクも残らない", Startup.Current() == StartupMode.None,
+              "None", Startup.Current().ToString());
     }
 
     static async Task Reset(TextBox box)

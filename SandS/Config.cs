@@ -35,16 +35,22 @@ internal sealed class Config
     /// </summary>
     public Dictionary<string, string> Hotkeys { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
-    private static readonly JsonSerializerOptions JsonOpts = new()
+    /// <summary>
+    /// ソース生成したコンテキストを、独自オプション付きで作る。
+    /// JsonSourceGenerationOptions 属性では Encoder を指定できないため
+    /// (日本語コメントや文字列が \uXXXX に潰れて設定ファイルが読めなくなる)。
+    ///
+    /// 読み書きは必ずこの Ctx.Config (JsonTypeInfo) 経由で行うこと。
+    /// JsonSerializer.Serialize<Config>(...) のような型引数版はリフレクションを要求し、
+    /// NativeAOT で動かなくなる。
+    /// </summary>
+    private static readonly ConfigJsonContext Ctx = new(new JsonSerializerOptions
     {
-        // リフレクションを使わない。NativeAOT で動かすための前提であり、
-        // 通常ビルドでも起動時のリフレクション一式を読み込まずに済む。
-        TypeInfoResolver = ConfigJsonContext.Default,
         WriteIndented = true,
         ReadCommentHandling = JsonCommentHandling.Skip,
         AllowTrailingCommas = true,
         Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
-    };
+    });
 
     public static string DefaultPath => Path.Combine(AppContext.BaseDirectory, "sands.config.json");
 
@@ -55,14 +61,14 @@ internal sealed class Config
         if (!File.Exists(path))
         {
             var def = Default();
-            try { File.WriteAllText(path, JsonSerializer.Serialize(def, JsonOpts)); }
+            try { File.WriteAllText(path, JsonSerializer.Serialize(def, Ctx.Config)); }
             catch { /* 書けなくても動作には支障がない */ }
             return def;
         }
 
         try
         {
-            return JsonSerializer.Deserialize<Config>(File.ReadAllText(path), JsonOpts) ?? Default();
+            return JsonSerializer.Deserialize(File.ReadAllText(path), Ctx.Config) ?? Default();
         }
         catch (Exception ex)
         {
@@ -71,7 +77,7 @@ internal sealed class Config
         }
     }
 
-    public void Save(string path) => File.WriteAllText(path, JsonSerializer.Serialize(this, JsonOpts));
+    public void Save(string path) => File.WriteAllText(path, JsonSerializer.Serialize(this, Ctx.Config));
 
     /// <summary>元の AutoHotkey スクリプトをそのまま移した既定値。</summary>
     public static Config Default() => new()

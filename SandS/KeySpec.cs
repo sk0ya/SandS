@@ -1,5 +1,5 @@
 using System.Globalization;
-using System.Windows.Forms;
+
 using static SandS.Native;
 
 namespace SandS;
@@ -12,42 +12,44 @@ namespace SandS;
 /// 仮想キーコードが配列やIME状態で揺れるので、物理位置で指定する方が確実。
 /// ByScan の場合は一致判定も送出もスキャンコードで行う。
 /// </summary>
-internal readonly record struct KeySpec(ushort Vk, ushort Scan, bool ByScan, bool Extended, string Text)
+/// 仮想キーコードは Code に入れる。プロパティ名を Vk にすると、この型の中で
+/// 列挙型 Vk が名前解決できなくなるため。
+internal readonly record struct KeySpec(ushort Code, ushort Scan, bool ByScan, bool Extended, string Text)
 {
-    private static readonly Dictionary<string, Keys> Aliases = new(StringComparer.OrdinalIgnoreCase)
+    private static readonly Dictionary<string, Vk> Aliases = new(StringComparer.OrdinalIgnoreCase)
     {
-        ["BackSpace"] = Keys.Back,
-        ["BS"] = Keys.Back,
-        ["Enter"] = Keys.Return,
-        ["Esc"] = Keys.Escape,
-        ["AppsKey"] = Keys.Apps,       // Keys.Menu は Alt なので別名にしない
-        ["ContextMenu"] = Keys.Apps,
-        ["LAlt"] = Keys.LMenu,
-        ["RAlt"] = Keys.RMenu,
-        ["Alt"] = Keys.LMenu,
-        ["LCtrl"] = Keys.LControlKey,
-        ["RCtrl"] = Keys.RControlKey,
-        ["Ctrl"] = Keys.LControlKey,
-        ["LShift"] = Keys.LShiftKey,
-        ["RShift"] = Keys.RShiftKey,
-        ["Shift"] = Keys.LShiftKey,
-        ["Del"] = Keys.Delete,
-        ["Ins"] = Keys.Insert,
-        ["PgUp"] = Keys.PageUp,
-        ["PgDn"] = Keys.PageDown,
+        ["BackSpace"] = Vk.Back,
+        ["BS"] = Vk.Back,
+        ["Enter"] = Vk.Return,
+        ["Esc"] = Vk.Escape,
+        ["AppsKey"] = Vk.Apps,       // Vk.Menu は Alt なので別名にしない
+        ["ContextMenu"] = Vk.Apps,
+        ["LAlt"] = Vk.LMenu,
+        ["RAlt"] = Vk.RMenu,
+        ["Alt"] = Vk.LMenu,
+        ["LCtrl"] = Vk.LControlKey,
+        ["RCtrl"] = Vk.RControlKey,
+        ["Ctrl"] = Vk.LControlKey,
+        ["LShift"] = Vk.LShiftKey,
+        ["RShift"] = Vk.RShiftKey,
+        ["Shift"] = Vk.LShiftKey,
+        ["Del"] = Vk.Delete,
+        ["Ins"] = Vk.Insert,
+        ["PgUp"] = Vk.PageUp,
+        ["PgDn"] = Vk.PageDown,
         // 日本語キーボード
-        ["Muhenkan"] = (Keys)0x1D,
-        ["Henkan"] = (Keys)0x1C,
-        ["KanaMode"] = (Keys)0x15,
-        ["Kanji"] = (Keys)0x19,
+        ["Muhenkan"] = (Vk)0x1D,
+        ["Henkan"] = (Vk)0x1C,
+        ["KanaMode"] = (Vk)0x15,
+        ["Kanji"] = (Vk)0x19,
     };
 
-    private static readonly HashSet<Keys> ExtendedKeys =
+    private static readonly HashSet<Vk> ExtendedKeys =
     [
-        Keys.RControlKey, Keys.RMenu, Keys.LWin, Keys.RWin, Keys.Apps,
-        Keys.Insert, Keys.Delete, Keys.Home, Keys.End, Keys.PageUp, Keys.PageDown,
-        Keys.Left, Keys.Right, Keys.Up, Keys.Down,
-        Keys.NumLock, Keys.Divide, Keys.PrintScreen,
+        Vk.RControlKey, Vk.RMenu, Vk.LWin, Vk.RWin, Vk.Apps,
+        Vk.Insert, Vk.Delete, Vk.Home, Vk.End, Vk.PageUp, Vk.PageDown,
+        Vk.Left, Vk.Right, Vk.Up, Vk.Down,
+        Vk.NumLock, Vk.Divide, Vk.PrintScreen,
     ];
 
     public static bool TryParse(string? s, out KeySpec key)
@@ -69,26 +71,26 @@ internal readonly record struct KeySpec(ushort Vk, ushort Scan, bool ByScan, boo
         // vk1D — 仮想キーコード直接指定
         if (s.StartsWith("vk", StringComparison.OrdinalIgnoreCase) &&
             int.TryParse(s[2..], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out int vkRaw))
-            return TryFromVk((Keys)vkRaw, s, out key);
+            return TryFromVk((Vk)vkRaw, s, out key);
 
         if (Aliases.TryGetValue(s, out var aliased))
             return TryFromVk(aliased, s, out key);
 
-        // "1" は Enum.TryParse だと数値 1 (=Keys.LButton) として通ってしまうので先に潰す
+        // "1" は Enum.TryParse だと数値 1 として通ってしまうので先に潰す
         if (s.Length == 1 && s[0] is >= '0' and <= '9')
-            return TryFromVk(Keys.D0 + (s[0] - '0'), s, out key);
+            return TryFromVk((Vk)((int)Vk.D0 + (s[0] - '0')), s, out key);
 
-        if (Enum.TryParse<Keys>(s, ignoreCase: true, out var parsed) && parsed != Keys.None &&
+        if (Enum.TryParse<Vk>(s, ignoreCase: true, out var parsed) && parsed != Vk.None &&
             !int.TryParse(s, out _))
             return TryFromVk(parsed, s, out key);
 
         return false;
     }
 
-    private static bool TryFromVk(Keys vk, string text, out KeySpec key)
+    private static bool TryFromVk(Vk vk, string text, out KeySpec key)
     {
-        if (vk == Keys.None) { key = default; return false; }
-        ushort scan = (ushort)MapVirtualKey((uint)vk, MAPVK_VK_TO_VSC);
+        if (vk == Vk.None) { key = default; return false; }
+        ushort scan = (ushort)MapVirtualKeyW((uint)vk, MAPVK_VK_TO_VSC);
         key = new KeySpec((ushort)vk, scan, ByScan: false, ExtendedKeys.Contains(vk), text);
         return true;
     }
@@ -99,7 +101,7 @@ internal readonly record struct KeySpec(ushort Vk, ushort Scan, bool ByScan, boo
     /// </summary>
     public bool Matches(in KBDLLHOOKSTRUCT info) =>
         ByScan ? info.scanCode == Scan && ((info.flags & LLKHF_EXTENDED) != 0) == Extended
-               : info.vkCode == Vk;
+               : info.vkCode == Code;
 
     public override string ToString() => Text;
 }
