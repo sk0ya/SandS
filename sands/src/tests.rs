@@ -1,5 +1,5 @@
-//! C# 版 E2E の Part 1 に相当する検証。
-//! 実キー挙動 (Part 2) は tests/SandS.E2E が exe をブラックボックスとして受け持つ。
+//! パーサ・設定・アイコン・タスク XML の検証。
+//! 実キー挙動は tests/e2e が exe をブラックボックスとして受け持つ。
 
 use crate::config::Config;
 use crate::engine::Engine;

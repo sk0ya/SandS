@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>e2e</AssemblyName>
+    <RootNamespace>E2E</RootNamespace>
+  </PropertyGroup>
+
+  <!--
+    アプリ本体への参照は持たない。
+    このハーネスは exe をブラックボックスとして起動し、実際にコントロールへ届いたキーを
+    観測するだけなので、実装言語に依存しない。
+    パーサや設定の内部検証は sands の cargo test が受け持つ。
+  -->
+</Project>
