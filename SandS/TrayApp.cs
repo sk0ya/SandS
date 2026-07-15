@@ -12,8 +12,6 @@ namespace SandS;
 /// </summary>
 internal sealed unsafe class TrayApp : IDisposable
 {
-    private const string StartupRegKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
-    private const string StartupValueName = "SandS";
     private const uint TrayId = 1;
 
     private const uint CmdEnabled = 1;
@@ -27,6 +25,12 @@ internal sealed unsafe class TrayApp : IDisposable
     private IntPtr _iconOn, _iconOff;
     private Engine? _engine;
     private bool _enabled = true;
+
+    /// <summary>
+    /// メニューを開くたびに schtasks を起動すると重いので、状態は持っておいて
+    /// 起動時と変更時にだけ調べ直す。
+    /// </summary>
+    private StartupMode _startup;
 
     // GC に回収されるとコールバックが死ぬので、必ずフィールドで保持する
     private readonly WndProc _wndProc;
@@ -50,6 +54,7 @@ internal sealed unsafe class TrayApp : IDisposable
 
         if (!LoadEngine(initial: true)) return false;
 
+        _startup = Startup.Current();
         AddTrayIcon();
         return true;
     }
@@ -146,7 +151,10 @@ internal sealed unsafe class TrayApp : IDisposable
         uFlags = flags,
         uCallbackMessage = WM_TRAY,
         hIcon = _enabled ? _iconOn : _iconOff,
-        szTip = $"SandS — {(_enabled ? "有効" : "停止中")}",
+        // 昇格していないと管理者権限のウィンドウ上でだけ効かない。
+        // 気づける場所が無いと原因不明の不具合に見えるので出しておく。
+        szTip = $"SandS — {(_enabled ? "有効" : "停止中")}"
+                + (Startup.IsElevated() ? " (管理者)" : ""),
         szInfo = "",
         szInfoTitle = "",
     };
@@ -170,7 +178,16 @@ internal sealed unsafe class TrayApp : IDisposable
     {
         IntPtr menu = CreatePopupMenu();
         AppendMenuW(menu, MF_STRING | (_enabled ? MF_CHECKED : 0), (UIntPtr)CmdEnabled, "有効(&E)");
-        AppendMenuW(menu, MF_STRING | (IsStartupRegistered() ? MF_CHECKED : 0), (UIntPtr)CmdStartup, "Windows 起動時に開始(&S)");
+
+        // 管理者権限のウィンドウ上で効くかどうかが、ここで分かるようにしておく。
+        // 効かないときに理由が分からないのが一番困るため。
+        string startupLabel = _startup switch
+        {
+            StartupMode.Task => "Windows 起動時に開始(&S) — 管理者",
+            StartupMode.Registry => "Windows 起動時に開始(&S) — 通常",
+            _ => "Windows 起動時に開始(&S)",
+        };
+        AppendMenuW(menu, MF_STRING | (_startup != StartupMode.None ? MF_CHECKED : 0), (UIntPtr)CmdStartup, startupLabel);
         AppendMenuW(menu, MF_SEPARATOR, UIntPtr.Zero, "");
         AppendMenuW(menu, MF_STRING, (UIntPtr)CmdReload, "設定を再読み込み(&R)");
         AppendMenuW(menu, MF_STRING, (UIntPtr)CmdEdit, "設定ファイルを編集(&O)");
@@ -186,7 +203,7 @@ internal sealed unsafe class TrayApp : IDisposable
         switch ((uint)cmd)
         {
             case CmdEnabled: SetEnabled(!_enabled); break;
-            case CmdStartup: SetStartup(!IsStartupRegistered()); break;
+            case CmdStartup: ToggleStartup(); break;
             case CmdReload: Reload(); break;
             case CmdEdit: EditConfig(); break;
             case CmdExit: DestroyWindow(_hwnd); break;
@@ -275,25 +292,13 @@ internal sealed unsafe class TrayApp : IDisposable
 
     // ---- スタートアップ ----------------------------------------------------
 
-    private static bool IsStartupRegistered()
+    private void ToggleStartup()
     {
-        using var key = Registry.CurrentUser.OpenSubKey(StartupRegKey, writable: false);
-        return key?.GetValue(StartupValueName) is not null;
-    }
+        string? note;
+        if (_startup == StartupMode.None) _startup = Startup.Enable(out note);
+        else { Startup.Disable(out note); _startup = Startup.Current(); }
 
-    private void SetStartup(bool enable)
-    {
-        try
-        {
-            using var key = Registry.CurrentUser.OpenSubKey(StartupRegKey, writable: true)
-                            ?? Registry.CurrentUser.CreateSubKey(StartupRegKey);
-            if (enable) key.SetValue(StartupValueName, $"\"{Environment.ProcessPath}\"");
-            else key.DeleteValue(StartupValueName, throwOnMissingValue: false);
-        }
-        catch (Exception ex)
-        {
-            Warn($"スタートアップ設定を変更できませんでした。\n\n{ex.Message}");
-        }
+        if (note is not null) Warn(note);
     }
 
     // ---- ダイアログ --------------------------------------------------------

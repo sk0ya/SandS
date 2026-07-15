@@ -300,4 +300,28 @@ internal static partial class Native
                                                string? lpParameters, string? lpDirectory, int nShowCmd);
 
     public const int SW_SHOWNORMAL = 1;
+    public const int SW_HIDE = 0;
+
+    // ---- 昇格しているかの判定 ----------------------------------------------
+
+    public const uint TOKEN_QUERY = 0x0008;
+    /// <summary>TOKEN_INFORMATION_CLASS.TokenElevation</summary>
+    public const int TokenElevation = 20;
+
+    [LibraryImport("kernel32.dll")]
+    public static partial IntPtr GetCurrentProcess();
+
+    [LibraryImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool OpenProcessToken(IntPtr ProcessHandle, uint DesiredAccess, out IntPtr TokenHandle);
+
+    [LibraryImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool GetTokenInformation(IntPtr TokenHandle, int TokenInformationClass,
+                                                   out uint TokenInformation, int TokenInformationLength,
+                                                   out int ReturnLength);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool CloseHandle(IntPtr hObject);
 }
