@@ -1,6 +1,4 @@
-using System.Diagnostics;
 using System.Text;
-using Microsoft.Win32;
 using static SandS.Native;
 
 namespace SandS;
@@ -48,9 +46,43 @@ internal static class Startup
     public static StartupMode Current()
     {
         if (TaskExists()) return StartupMode.Task;
+        return RegistryHasValue() ? StartupMode.Registry : StartupMode.None;
+    }
 
-        using var key = Registry.CurrentUser.OpenSubKey(RegKey, writable: false);
-        return key?.GetValue(ValueName) is not null ? StartupMode.Registry : StartupMode.None;
+    // ---- レジストリ (Microsoft.Win32.Registry を参照しないよう直接叩く) -----
+
+    private static bool RegistryHasValue()
+    {
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, RegKey, 0, KEY_READ, out IntPtr h) != ERROR_SUCCESS) return false;
+        try
+        {
+            return RegQueryValueExW(h, ValueName, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero) == ERROR_SUCCESS;
+        }
+        finally { RegCloseKey(h); }
+    }
+
+    private static bool RegistrySet(string exe, out string? error)
+    {
+        error = null;
+        int rc = RegCreateKeyExW(HKEY_CURRENT_USER, RegKey, 0, IntPtr.Zero, 0, KEY_WRITE, IntPtr.Zero,
+                                 out IntPtr h, out _);
+        if (rc != ERROR_SUCCESS) { error = $"レジストリキーを開けませんでした (error {rc})。"; return false; }
+        try
+        {
+            string val = $"\"{exe}\"";
+            // cbData は終端の NUL を含むバイト数
+            rc = RegSetValueExW(h, ValueName, 0, REG_SZ, val, (uint)((val.Length + 1) * 2));
+            if (rc != ERROR_SUCCESS) { error = $"レジストリに書けませんでした (error {rc})。"; return false; }
+            return true;
+        }
+        finally { RegCloseKey(h); }
+    }
+
+    private static void RemoveRegistry()
+    {
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, RegKey, 0, KEY_WRITE, out IntPtr h) != ERROR_SUCCESS) return;
+        try { RegDeleteValueW(h, ValueName); }
+        finally { RegCloseKey(h); }
     }
 
     /// <summary>登録する。昇格していればタスクとして、していなければ HKCU\Run に。</summary>
@@ -76,19 +108,13 @@ internal static class Startup
                    "このメニューで登録し直してください (タスクとして登録されます)。";
         }
 
-        try
+        if (!RegistrySet(exe, out string? regErr))
         {
-            using var key = Registry.CurrentUser.OpenSubKey(RegKey, writable: true)
-                            ?? Registry.CurrentUser.CreateSubKey(RegKey);
-            key.SetValue(ValueName, $"\"{exe}\"");
-            RemoveTask();
-            return StartupMode.Registry;
-        }
-        catch (Exception ex)
-        {
-            note = $"スタートアップに登録できませんでした。\n\n{ex.Message}";
+            note = $"スタートアップに登録できませんでした。\n\n{regErr}";
             return StartupMode.None;
         }
+        RemoveTask();
+        return StartupMode.Registry;
     }
 
     public static void Disable(out string? note)
@@ -109,19 +135,9 @@ internal static class Startup
 
     // ---- タスクスケジューラ ------------------------------------------------
 
-    private static bool TaskExists() => RunSchtasks($"/Query /TN \"{TaskName}\"", out _) == 0;
+    private static bool TaskExists() => RunSchtasks($"/Query /TN \"{TaskName}\"") == 0;
 
-    private static void RemoveTask() => RunSchtasks($"/Delete /TN \"{TaskName}\" /F", out _);
-
-    private static void RemoveRegistry()
-    {
-        try
-        {
-            using var key = Registry.CurrentUser.OpenSubKey(RegKey, writable: true);
-            key?.DeleteValue(ValueName, throwOnMissingValue: false);
-        }
-        catch { /* 消せなくても致命的ではない */ }
-    }
+    private static void RemoveTask() => RunSchtasks($"/Delete /TN \"{TaskName}\" /F");
 
     private static bool TryCreateTask(string exe, out string? error)
     {
@@ -133,10 +149,12 @@ internal static class Startup
             // schtasks /XML は UTF-16 の XML しか受け付けない
             File.WriteAllText(xmlPath, TaskXml(exe), Encoding.Unicode);
 
-            int rc = RunSchtasks($"/Create /TN \"{TaskName}\" /XML \"{xmlPath}\" /F", out string output);
+            int rc = RunSchtasks($"/Create /TN \"{TaskName}\" /XML \"{xmlPath}\" /F");
             if (rc == 0) return true;
 
-            error = string.IsNullOrWhiteSpace(output) ? $"schtasks が {rc} で終了しました。" : output.Trim();
+            error = rc == 1
+                ? "アクセスが拒否されました。タスクの登録には管理者権限が必要です。"
+                : $"schtasks が {rc} で終了しました。";
             return false;
         }
         catch (Exception ex)
@@ -204,28 +222,35 @@ internal static class Startup
     private static string Esc(string s) =>
         s.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;").Replace("\"", "&quot;");
 
-    private static int RunSchtasks(string args, out string output)
+    /// <summary>
+    /// schtasks を起動して終了コードを返す。
+    /// System.Diagnostics.Process は AOT で 200KB 以上を持ち込むうえ、ここでは
+    /// 終了コードしか要らないので CreateProcessW を直接使う。
+    /// </summary>
+    private static unsafe int RunSchtasks(string args)
     {
-        output = "";
+        // CreateProcessW は lpCommandLine を書き換えることがあるので、書き込める配列を渡す
+        char[] cmd = $"schtasks.exe {args}\0".ToCharArray();
+
+        var si = new STARTUPINFOW { cb = (uint)sizeof(STARTUPINFOW) };
+        PROCESS_INFORMATION pi = default;
+
+        fixed (char* pCmd = cmd)
+        {
+            if (!CreateProcessW(null, pCmd, IntPtr.Zero, IntPtr.Zero, false, CREATE_NO_WINDOW,
+                                IntPtr.Zero, null, &si, &pi))
+                return -1;
+        }
+
         try
         {
-            using var p = Process.Start(new ProcessStartInfo("schtasks.exe", args)
-            {
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-            });
-            if (p is null) return -1;
-
-            output = p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd();
-            p.WaitForExit(10000);
-            return p.ExitCode;
+            if (WaitForSingleObject(pi.hProcess, 15000) != WAIT_OBJECT_0) return -1;
+            return GetExitCodeProcess(pi.hProcess, out uint code) ? (int)code : -1;
         }
-        catch (Exception ex)
+        finally
         {
-            output = ex.Message;
-            return -1;
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
         }
     }
 }

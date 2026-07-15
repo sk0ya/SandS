@@ -324,4 +324,80 @@ internal static partial class Native
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static partial bool CloseHandle(IntPtr hObject);
+
+    // ---- 子プロセス --------------------------------------------------------
+    // System.Diagnostics.Process は AOT で 200KB 以上を持ち込む。
+    // schtasks を待って終了コードを見るだけなので、CreateProcessW で足りる。
+
+    public const uint CREATE_NO_WINDOW = 0x08000000;
+    public const uint INFINITE = 0xFFFFFFFF;
+    public const uint WAIT_OBJECT_0 = 0;
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct STARTUPINFOW
+    {
+        public uint cb;
+        public IntPtr lpReserved;
+        public IntPtr lpDesktop;
+        public IntPtr lpTitle;
+        public uint dwX, dwY, dwXSize, dwYSize, dwXCountChars, dwYCountChars, dwFillAttribute, dwFlags;
+        public ushort wShowWindow, cbReserved2;
+        public IntPtr lpReserved2, hStdInput, hStdOutput, hStdError;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct PROCESS_INFORMATION
+    {
+        public IntPtr hProcess, hThread;
+        public uint dwProcessId, dwThreadId;
+    }
+
+    /// <summary>lpCommandLine は CreateProcessW に書き換えられうるので、書き込める領域を渡すこと。</summary>
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static unsafe partial bool CreateProcessW(
+        char* lpApplicationName, char* lpCommandLine,
+        IntPtr lpProcessAttributes, IntPtr lpThreadAttributes,
+        [MarshalAs(UnmanagedType.Bool)] bool bInheritHandles, uint dwCreationFlags,
+        IntPtr lpEnvironment, char* lpCurrentDirectory,
+        STARTUPINFOW* lpStartupInfo, PROCESS_INFORMATION* lpProcessInformation);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    public static partial uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool GetExitCodeProcess(IntPtr hProcess, out uint lpExitCode);
+
+    // ---- レジストリ --------------------------------------------------------
+    // Microsoft.Win32.Registry の参照を外すため直接叩く。
+
+    public static readonly IntPtr HKEY_CURRENT_USER = unchecked((IntPtr)(int)0x80000001);
+
+    public const uint KEY_READ = 0x20019;
+    public const uint KEY_WRITE = 0x20006;
+    public const uint REG_SZ = 1;
+    public const int ERROR_SUCCESS = 0;
+
+    [LibraryImport("advapi32.dll", StringMarshalling = StringMarshalling.Utf16)]
+    public static partial int RegOpenKeyExW(IntPtr hKey, string lpSubKey, uint ulOptions, uint samDesired, out IntPtr phkResult);
+
+    [LibraryImport("advapi32.dll", StringMarshalling = StringMarshalling.Utf16)]
+    public static partial int RegCreateKeyExW(IntPtr hKey, string lpSubKey, uint Reserved, IntPtr lpClass,
+                                              uint dwOptions, uint samDesired, IntPtr lpSecurityAttributes,
+                                              out IntPtr phkResult, out uint lpdwDisposition);
+
+    [LibraryImport("advapi32.dll", StringMarshalling = StringMarshalling.Utf16)]
+    public static partial int RegQueryValueExW(IntPtr hKey, string lpValueName, IntPtr lpReserved,
+                                               IntPtr lpType, IntPtr lpData, IntPtr lpcbData);
+
+    [LibraryImport("advapi32.dll", StringMarshalling = StringMarshalling.Utf16)]
+    public static partial int RegSetValueExW(IntPtr hKey, string lpValueName, uint Reserved, uint dwType,
+                                             string lpData, uint cbData);
+
+    [LibraryImport("advapi32.dll", StringMarshalling = StringMarshalling.Utf16)]
+    public static partial int RegDeleteValueW(IntPtr hKey, string lpValueName);
+
+    [LibraryImport("advapi32.dll")]
+    public static partial int RegCloseKey(IntPtr hKey);
 }

@@ -33,9 +33,6 @@
     <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
   </PropertyGroup>
 
-  <ItemGroup>
-    <PackageReference Include="Microsoft.Win32.Registry" Version="5.0.0" />
-  </ItemGroup>
 
   <ItemGroup>
     <!-- E2E テストが Config/Engine を直接コンパイル検証するため -->
