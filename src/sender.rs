@@ -150,14 +150,37 @@ pub fn send_combo(combo: &Combo, phys_mask: u8) -> u8 {
         }
     }
 
-    key_spec(&combo.key, true);
-    key_spec(&combo.key, false);
+    // "{Down 2}" のような回数指定。修飾キーは保持したまま本体だけ繰り返す。
+    for _ in 0..combo.repeat {
+        key_spec(&combo.key, true);
+        key_spec(&combo.key, false);
+    }
 
     for i in (0..pressed_n).rev() {
         key(pressed[i], false);
     }
     for i in (0..released_n).rev() {
         key(released[i], true);
+    }
+
+    // コンボ側で押した修飾キーと同じ系統を物理的にも押している場合 (Ctrl 押下中に
+    // "^{-}" を送る、など)、直前の key up で物理側まで論理的に「離れた」ことになる。
+    // Ctrl/Shift は押し直して合わせる。Alt/Win は押し直すと、ユーザーが指を離した
+    // ときの「単独押し」でメニューが開くので押し直さない (unrestored と同じ理屈)。
+    if phys_mask != 0 && pressed_n > 0 {
+        for bit in 0..8u32 {
+            if phys_mask & (1 << bit) == 0 {
+                continue;
+            }
+            let held = modmask::VKS[bit as usize];
+            let group = group_of(held);
+            if group != ModGroup::CTRL && group != ModGroup::SHIFT {
+                continue;
+            }
+            if (0..pressed_n).any(|i| group_of(pressed[i]) == group) {
+                key(held, true);
+            }
+        }
     }
 
     unrestored

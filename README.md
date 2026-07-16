@@ -9,13 +9,14 @@ Rust 製。ランタイム不要の単一 exe **0.28MB**、常駐時の Private 
 増える分は shell32/comctl32 などの共有 DLL のページで、メモリ圧迫時には OS が回収します。
 SandS 固有の消費を見るなら Private の方です。)
 
-扱う機能は 3 つです。
+扱う機能は 4 つです。
 
 | 機能 | 例 | AHK での書き方 |
 | --- | --- | --- |
 | プレフィックスキー | Space 単打でスペース、押しながらで Shift | `Space & x::` + `Space::` |
 | ホットキー | `Alt+;` → `Ctrl+F12` | `!sc027::Send "^{F12}"` |
 | 単純リマップ | カタカナ/ひらがな → 半角/全角 | `sc070::Send "{sc029}"` |
+| アプリ別ホットキー | Excel でだけ `Tab` → 次のシート | `#IfWinActive ahk_exe EXCEL.EXE` |
 
 ## ビルドと実行
 
@@ -59,6 +60,10 @@ target\release\sands.exe
 
 - 修飾キー: `^` Ctrl / `!` Alt / `+` Shift / `#` Win
 - キー名: WinForms の `Keys` と同じ名前 + 別名 (`BackSpace`, `Enter`, `Esc`, `AppsKey`, `Muhenkan`, `Henkan` など)
+- 文字 1 つ (`{-}`, `{_}`, `{&}` など) は、いまのキーボード配列でその文字を打つキー + 修飾キーに
+  展開されます (JIS なら `{&}` = Shift+6)。AHK の Send と同じ考え方です。
+- **送出側は連続送出も書けます**。`"+{Space}^{x}{Down 2}"` のように「修飾キー + `{キー}`」を並べ、
+  `{Down 2}` の数値は繰り返し回数です (AHK の Send と同じ)。トリガー側は 1 打鍵だけです。
 - スキャンコード指定: `sc027` のように書くと**物理位置**で判定・送出します。
   日本語配列で仮想キーコードが揺れるキー (`sc029` = 半角/全角 など) はこちらが確実です。
   拡張キーは AHK と同じく `sc14B` のように 0x100 のビットを立てます。
@@ -67,6 +72,24 @@ target\release\sands.exe
   例: `BackSpace & h → "{Blind}Left"` は Shift 押下中なら Shift+Left (選択) になります。
 - `@reload` / `@edit` / `@toggle` / `@exit` はキーではなくアプリへの命令です
   (元スクリプトの `BackSpace & R::Reload` / `BackSpace & e::Edit` に相当)。
+
+### AppHotkeys / アプリ別ホットキー
+
+特定のアプリがフォアグラウンドのときだけ効くホットキー。AHK の
+`#IfWinActive ahk_exe EXCEL.EXE` に相当し、全体の `Hotkeys` より優先されます。
+実行ファイル名 (大文字小文字は区別しない) → `Hotkeys` と同じ書式です。
+
+```jsonc
+"AppHotkeys": {
+  "EXCEL.EXE": {
+    "Tab": "^{PgDn}",                            // 次のシート
+    "!Up": "+{Space}^{x}{Up}+{Space}+^{sc027}"   // 行を上へ移動 (連続送出)
+  }
+}
+```
+
+フォアグラウンドの exe 名はウィンドウが替わったときだけプロセスに問い合わせ、
+あとは HWND で引くキャッシュを使います (打鍵ごとの確保をしないため)。
 
 ## 元の AHK スクリプトとの差分
 

@@ -40,6 +40,11 @@ pub struct Config {
     /// プレフィックスを介さないホットキー / 単純リマップ。
     /// "!sc027": "^F12" や "sc070": "sc029" のように書く。
     pub hotkeys: IndexMap<String, String>,
+    /// 特定のアプリがフォアグラウンドのときだけ効くホットキー。
+    /// 実行ファイル名 (大文字小文字は区別しない) → Hotkeys と同じ書式。
+    /// AHK の #IfWinActive ahk_exe EXCEL.EXE に相当し、全体の Hotkeys より優先される。
+    /// 送出側は "+{Space}^{x}{Down 2}" のような連続送出も書ける。
+    pub app_hotkeys: IndexMap<String, IndexMap<String, String>>,
 }
 
 pub fn default_path() -> PathBuf {
@@ -152,6 +157,26 @@ impl Config {
                 ("!sc027", "^F12"),
                 ("sc070", "sc029"),
             ]),
+            // 元の AHK スクリプトの #IfWinActive ahk_exe EXCEL.EXE ブロック
+            app_hotkeys: [(
+                "EXCEL.EXE".to_string(),
+                m(&[
+                    ("+Space", "+{Space}"),                                // 行選択
+                    ("+^sc027", "+{Space}+^{sc027}"),                      // 行選択して…
+                    ("+^!sc027", "^{Space}+^{sc027}"),                     // 列選択して…
+                    ("^l", "+{Space}^{-}"),                                // 行削除
+                    ("Tab", "^{PgDn}"),                                    // 次のシート
+                    ("+Tab", "^{PgUp}"),                                   // 前のシート
+                    ("!Up", "+{Space}^{x}{Up}+{Space}+^{sc027}"),          // 行を上へ移動
+                    ("!Down", "+{Space}^{x}{Down 2}+{Space}+^{sc027}"),    // 行を下へ移動
+                    ("!+Down", "+{Space}^{c}{Down}+{Space}+^{sc027}"),     // 行を下へ複製
+                    ("!Right", "^{x}{Right 2}{AppsKey}{e}{Enter}"),        // セルを右へ移動
+                    ("!Left", "^{x}{Left}{AppsKey}{e}{Enter}"),            // セルを左へ移動
+                    ("^q", "^{_}^{&}"),                                    // 罫線を引き直す
+                ]),
+            )]
+            .into_iter()
+            .collect(),
         }
     }
 }

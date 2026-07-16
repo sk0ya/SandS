@@ -1,7 +1,7 @@
 //! 1 つのキーの指定と、AHK 風のキーコンボ。
 
 use crate::vk;
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{MapVirtualKeyW, MAPVK_VK_TO_VSC};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{MapVirtualKeyW, VkKeyScanW, MAPVK_VK_TO_VSC};
 use windows_sys::Win32::UI::WindowsAndMessaging::KBDLLHOOKSTRUCT;
 
 const LLKHF_EXTENDED: u32 = 0x01;
@@ -177,7 +177,7 @@ pub mod modmask {
     }
 }
 
-/// AHK 風のキーコンボ。"^#Left" / "!F4" / "{Blind}Left" / "sc029" / "#1" など。
+/// AHK 風のキーコンボ 1 打鍵分。"^#Left" / "!F4" / "{Blind}Left" / "sc029" / "#1" など。
 ///
 ///   ^ = Ctrl, ! = Alt, + = Shift, # = Win
 ///   {Blind} を先頭に付けると、物理的に押されている修飾キーをそのまま残して送る。
@@ -187,50 +187,135 @@ pub struct Combo {
     pub mods: ModGroup,
     pub key: KeySpec,
     pub blind: bool,
+    /// "{Down 2}" の 2。修飾キーを保持したまま key だけこの回数打つ。
+    pub repeat: u16,
 }
 
 impl Combo {
     pub fn parse(s: &str) -> Result<Combo, String> {
+        let mut steps = Combo::parse_sequence(s)?;
+        if steps.len() != 1 {
+            return Err(format!("ここには 1 打鍵だけ書けます: \"{s}\""));
+        }
+        Ok(steps.pop().unwrap())
+    }
+
+    /// AHK の Send 風の連続送出。"+{Space}^{x}{Down 2}+^{sc027}" のように
+    /// 「修飾キー + {キー}」を並べて書く。1 打鍵だけなら従来の書き方 ("^F12") と同じ。
+    /// {} 内の末尾の数値は繰り返し回数 ("{Down 2}")。
+    /// 先頭の {Blind} は全ステップに効く。
+    pub fn parse_sequence(s: &str) -> Result<Vec<Combo>, String> {
         let mut s = s.trim();
         if s.is_empty() {
             return Err("空です".into());
         }
 
-        // ここも同じ。s[..7] だと非 ASCII で文字境界を割って panic する。
+        // s[..7] だと非 ASCII で文字境界を割って panic する。get なら None が返る。
         let mut blind = false;
         if s.get(..7).is_some_and(|p| p.eq_ignore_ascii_case("{Blind}")) {
             blind = true;
             s = s[7..].trim();
         }
 
-        let mut mods = ModGroup::NONE;
+        let mut steps = Vec::new();
         let mut rest = s;
-        loop {
-            let c = match rest.chars().next() {
-                Some(c) => c,
-                None => break,
-            };
-            match c {
-                '^' => mods |= ModGroup::CTRL,
-                '!' => mods |= ModGroup::ALT,
-                '+' => mods |= ModGroup::SHIFT,
-                '#' => mods |= ModGroup::WIN,
-                // AHK の左右指定。一致判定は左右を区別しないので読み飛ばす。
-                '<' | '>' => {}
-                _ => break,
+        while !rest.is_empty() {
+            let mut mods = ModGroup::NONE;
+            loop {
+                let c = match rest.chars().next() {
+                    Some(c) => c,
+                    None => break,
+                };
+                match c {
+                    '^' => mods |= ModGroup::CTRL,
+                    '!' => mods |= ModGroup::ALT,
+                    '+' => mods |= ModGroup::SHIFT,
+                    '#' => mods |= ModGroup::WIN,
+                    // AHK の左右指定。一致判定は左右を区別しないので読み飛ばす。
+                    '<' | '>' => {}
+                    _ => break,
+                }
+                rest = &rest[c.len_utf8()..];
             }
-            rest = &rest[c.len_utf8()..];
+            rest = rest.trim_start();
+
+            let key_part;
+            let mut repeat = 1u16;
+            if let Some(inner_rest) = rest.strip_prefix('{') {
+                let end = inner_rest
+                    .find('}')
+                    .ok_or_else(|| format!("{{ が閉じていません: \"{s}\""))?;
+                let inner = inner_rest[..end].trim();
+                rest = inner_rest[end + 1..].trim_start();
+                // "{Down 2}" — 空白のあとの数値は繰り返し回数 (AHK と同じ)
+                match inner.rsplit_once(char::is_whitespace) {
+                    Some((name, n)) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => {
+                        key_part = name.trim_end();
+                        repeat = n
+                            .parse::<u16>()
+                            .map_err(|_| format!("繰り返し回数が大きすぎます: {{{inner}}}"))?;
+                    }
+                    _ => key_part = inner,
+                }
+            } else {
+                // 波括弧なし: 次のステップの始まりまでがキー名。
+                // 従来の 1 打鍵の書き方 ("^F12", "sc029") はここを通る。
+                let end = rest
+                    .find(|c| matches!(c, '{' | '^' | '!' | '+' | '#'))
+                    .unwrap_or(rest.len());
+                key_part = rest[..end].trim();
+                rest = rest[end..].trim_start();
+            }
+
+            if key_part.is_empty() {
+                return Err(format!("キー名がありません: \"{s}\""));
+            }
+            let (key, char_mods) = parse_key_or_char(key_part)?;
+            steps.push(Combo {
+                mods: mods | char_mods,
+                key,
+                blind,
+                repeat,
+            });
         }
 
-        let mut key_part = rest.trim();
-        // AHK は Send の中でキー名を {} で括る ("{Left}")。どちらの書き方も受ける。
-        if key_part.len() > 2 && key_part.starts_with('{') && key_part.ends_with('}') {
-            key_part = key_part[1..key_part.len() - 1].trim();
+        if steps.is_empty() {
+            return Err("空です".into());
         }
+        Ok(steps)
+    }
+}
 
-        match KeySpec::parse(key_part) {
-            Some(key) => Ok(Combo { mods, key, blind }),
-            None => Err(format!("キー \"{key_part}\" を解釈できません")),
+/// キー名、またはキー名にない 1 文字 ("-", "_", "&" など)。
+/// 文字は VkKeyScanW で「現在のキーボード配列でその文字を打つキー + 修飾キー」に
+/// 展開する (JIS の "&" = Shift+6 など)。AHK の Send と同じ考え方。
+fn parse_key_or_char(s: &str) -> Result<(KeySpec, ModGroup), String> {
+    if let Some(k) = KeySpec::parse(s) {
+        return Ok((k, ModGroup::NONE));
+    }
+
+    let mut chars = s.chars();
+    if let (Some(c), None) = (chars.next(), chars.next()) {
+        let mut buf = [0u16; 2];
+        if c.encode_utf16(&mut buf).len() == 1 {
+            let r = unsafe { VkKeyScanW(buf[0]) };
+            if r != -1 {
+                if let Some(key) = KeySpec::from_vk((r & 0xFF) as u16, s) {
+                    let state = (r >> 8) & 0xFF;
+                    let mut mods = ModGroup::NONE;
+                    if state & 1 != 0 {
+                        mods |= ModGroup::SHIFT;
+                    }
+                    if state & 2 != 0 {
+                        mods |= ModGroup::CTRL;
+                    }
+                    if state & 4 != 0 {
+                        mods |= ModGroup::ALT;
+                    }
+                    return Ok((key, mods));
+                }
+            }
         }
     }
+    Err(format!("キー \"{s}\" を解釈できません"))
 }

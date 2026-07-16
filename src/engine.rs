@@ -11,13 +11,19 @@ use crate::log;
 use crate::sender::{self, INJECTED_TAG};
 use crate::vk;
 
-use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+use indexmap::IndexMap;
+use windows_sys::Win32::Foundation::{CloseHandle, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::Threading::{
+    OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{MapVirtualKeyW, MAPVK_VK_TO_VSC};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
+#[derive(Clone)]
 pub enum Action {
-    Send(Combo),
+    /// 1 打鍵以上の連続送出。"^F12" は 1 要素、"+{Space}^{x}…" は複数要素。
+    Send(Vec<Combo>),
     /// "@reload" など。フック内で実行すると危険なので UI スレッドへ回す。
     Command(String),
 }
@@ -41,9 +47,23 @@ pub struct CompiledHotkey {
     pub binding: Binding,
 }
 
+/// 特定のアプリがフォアグラウンドのときだけ効くホットキー。
+/// AHK の `#IfWinActive ahk_exe EXCEL.EXE` に相当。
+pub struct AppHotkeys {
+    /// 実行ファイル名 (小文字)。"excel.exe" など。
+    pub exe: String,
+    pub hotkeys: Vec<CompiledHotkey>,
+}
+
 pub struct Engine {
     prefixes: Vec<CompiledPrefix>,
     hotkeys: Vec<CompiledHotkey>,
+    app_hotkeys: Vec<AppHotkeys>,
+
+    /// フォアグラウンドの exe 名 (小文字) のキャッシュ。プロセスへの問い合わせは
+    /// ウィンドウが替わったときだけにして、打鍵ごとの確保と OpenProcess を避ける。
+    fg_hwnd: isize,
+    fg_exe: String,
 
     pub enabled: bool,
 
@@ -132,30 +152,22 @@ impl Engine {
             });
         }
 
-        let mut hotkeys = Vec::new();
-        for (trigger, action) in &cfg.hotkeys {
-            let t = match Combo::parse(trigger) {
-                Ok(t) => t,
-                Err(e) => {
-                    problems.push(format!("Hotkeys \"{trigger}\": {e}"));
-                    continue;
-                }
-            };
-            match parse_action(action) {
-                Ok(a) => hotkeys.push(CompiledHotkey {
-                    mods: t.mods,
-                    binding: Binding {
-                        key: t.key,
-                        action: a,
-                    },
-                }),
-                Err(e) => problems.push(format!("Hotkeys \"{trigger}\": {e}")),
-            }
+        let hotkeys = compile_hotkeys(&cfg.hotkeys, "Hotkeys", problems);
+
+        let mut app_hotkeys = Vec::new();
+        for (exe, map) in &cfg.app_hotkeys {
+            app_hotkeys.push(AppHotkeys {
+                exe: exe.to_ascii_lowercase(),
+                hotkeys: compile_hotkeys(map, &format!("AppHotkeys {exe}"), problems),
+            });
         }
 
         Engine {
             prefixes,
             hotkeys,
+            app_hotkeys,
+            fg_hwnd: 0,
+            fg_exe: String::new(),
             enabled: true,
             active: None,
             active_used: false,
@@ -169,7 +181,8 @@ impl Engine {
     }
 
     pub fn counts(&self) -> (usize, usize) {
-        (self.prefixes.len(), self.hotkeys.len())
+        let app: usize = self.app_hotkeys.iter().map(|a| a.hotkeys.len()).sum();
+        (self.prefixes.len(), self.hotkeys.len() + app)
     }
 
     /// 無効化する瞬間に必ず後始末する。プレフィックスを押している最中 (= 修飾キー注入済み) に
@@ -238,25 +251,56 @@ impl Engine {
         }
     }
 
-    fn execute(&mut self, prefix_idx: Option<usize>, hotkey_idx: Option<usize>, map_idx: usize) {
-        // 借用を切るためにいったん複製する。発火は打鍵のたびではないので許容範囲。
-        let action: &Action = match (prefix_idx, hotkey_idx) {
-            (Some(p), _) => &self.prefixes[p].map[map_idx].action,
-            (_, Some(h)) => &self.hotkeys[h].binding.action,
-            _ => return,
-        };
+    /// 借用を切るため、呼び出し側が Action を複製して渡す。発火は打鍵のたびではないので許容範囲。
+    fn execute(&mut self, action: Action) {
         match action {
             Action::Command(c) => {
-                let c = c.clone();
                 self.pending.push(c);
                 // 積むだけでは誰も拾わない。UI スレッドを起こす。
                 // ここで直接実行してはいけない (LowLevelHooksTimeout でフックごと殺される)。
                 crate::tray::poke_commands();
             }
-            Action::Send(combo) => {
-                let combo = combo.clone();
-                self.send_combo(&combo);
+            Action::Send(seq) => {
+                // send_combo が phys_mask を更新していく (途中で Alt/Win を外した場合など)
+                // ので、後続のステップはそれを踏まえて送られる。
+                for combo in &seq {
+                    self.send_combo(combo);
+                }
             }
+        }
+    }
+
+    /// フォアグラウンドの exe 名 (小文字) を fg_exe に保つ。
+    /// AppHotkeys があるときの key down でだけ呼ばれ、問い合わせはウィンドウが替わった
+    /// ときだけ走る。昇格プロセスも PROCESS_QUERY_LIMITED_INFORMATION なら名前を取れる。
+    fn update_foreground(&mut self) {
+        unsafe {
+            let hwnd = GetForegroundWindow();
+            if hwnd as isize == self.fg_hwnd {
+                return;
+            }
+            self.fg_hwnd = hwnd as isize;
+            self.fg_exe.clear();
+            if hwnd.is_null() {
+                return;
+            }
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(hwnd, &mut pid);
+            if pid == 0 {
+                return;
+            }
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if h.is_null() {
+                return;
+            }
+            let mut buf = [0u16; 512];
+            let mut len = buf.len() as u32;
+            if QueryFullProcessImageNameW(h, 0, buf.as_mut_ptr(), &mut len) != 0 {
+                let path = String::from_utf16_lossy(&buf[..len as usize]);
+                let name = path.rsplit(['\\', '/']).next().unwrap_or("");
+                self.fg_exe = name.to_ascii_lowercase();
+            }
+            CloseHandle(h);
         }
     }
 
@@ -346,7 +390,8 @@ impl Engine {
             if let Some(m) = self.prefixes[idx].map.iter().position(|b| b.key.matches(info)) {
                 self.active_used = true;
                 self.swallow_add(info.scanCode as u16);
-                self.execute(Some(idx), None, m);
+                let action = self.prefixes[idx].map[m].action.clone();
+                self.execute(action);
                 return true;
             }
 
@@ -385,13 +430,32 @@ impl Engine {
         }
 
         let mods = modmask::groups_of(self.phys_mask);
+
+        // アプリ別ホットキー。全体の Hotkeys より優先する。
+        if !self.app_hotkeys.is_empty() {
+            self.update_foreground();
+            if let Some(a) = self.app_hotkeys.iter().position(|a| a.exe == self.fg_exe) {
+                if let Some(i) = self.app_hotkeys[a]
+                    .hotkeys
+                    .iter()
+                    .position(|h| h.mods == mods && h.binding.key.matches(info))
+                {
+                    self.swallow_add(info.scanCode as u16);
+                    let action = self.app_hotkeys[a].hotkeys[i].binding.action.clone();
+                    self.execute(action);
+                    return true;
+                }
+            }
+        }
+
         if let Some(i) = self
             .hotkeys
             .iter()
             .position(|h| h.mods == mods && h.binding.key.matches(info))
         {
             self.swallow_add(info.scanCode as u16);
-            self.execute(None, Some(i), 0);
+            let action = self.hotkeys[i].binding.action.clone();
+            self.execute(action);
             return true;
         }
 
@@ -403,7 +467,35 @@ fn parse_action(s: &str) -> Result<Action, String> {
     if s.starts_with('@') {
         return Ok(Action::Command(s.to_ascii_lowercase()));
     }
-    Combo::parse(s).map(Action::Send)
+    Combo::parse_sequence(s).map(Action::Send)
+}
+
+fn compile_hotkeys(
+    map: &IndexMap<String, String>,
+    ctx: &str,
+    problems: &mut Vec<String>,
+) -> Vec<CompiledHotkey> {
+    let mut out = Vec::new();
+    for (trigger, action) in map {
+        let t = match Combo::parse(trigger) {
+            Ok(t) => t,
+            Err(e) => {
+                problems.push(format!("{ctx} \"{trigger}\": {e}"));
+                continue;
+            }
+        };
+        match parse_action(action) {
+            Ok(a) => out.push(CompiledHotkey {
+                mods: t.mods,
+                binding: Binding {
+                    key: t.key,
+                    action: a,
+                },
+            }),
+            Err(e) => problems.push(format!("{ctx} \"{trigger}\": {e}")),
+        }
+    }
+    out
 }
 
 // ---- フックの設置 -----------------------------------------------------------

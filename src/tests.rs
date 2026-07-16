@@ -19,8 +19,10 @@ fn 既定設定が警告なしでコンパイルできる() {
 #[test]
 fn 既定設定の割り当て数() {
     let cfg = Config::default_config();
-    let n: usize = cfg.prefix_keys.iter().map(|p| p.map.len()).sum::<usize>() + cfg.hotkeys.len();
-    assert!(n >= 35, "割り当てが {n} 件しかない");
+    let n: usize = cfg.prefix_keys.iter().map(|p| p.map.len()).sum::<usize>()
+        + cfg.hotkeys.len()
+        + cfg.app_hotkeys.values().map(|m| m.len()).sum::<usize>();
+    assert!(n >= 47, "割り当てが {n} 件しかない");
 }
 
 #[test]
@@ -34,9 +36,15 @@ fn 設定はjsonを往復しても壊れない() {
     assert!(json.contains("\"HoldModifier\""), "{json}");
     assert!(json.contains("\"TapTimeoutMs\""), "{json}");
 
+    assert!(json.contains("\"AppHotkeys\""), "{json}");
+
     let back: Config = serde_json::from_str(&json).unwrap();
     assert_eq!(back.prefix_keys.len(), cfg.prefix_keys.len());
     assert_eq!(back.hotkeys.len(), cfg.hotkeys.len());
+    assert_eq!(
+        back.app_hotkeys.get("EXCEL.EXE").map(|m| m.len()),
+        cfg.app_hotkeys.get("EXCEL.EXE").map(|m| m.len())
+    );
     assert_eq!(back.prefix_keys[0].hold_modifier.as_deref(), Some("LShift"));
     // Map の順序が保たれること (IndexMap を使っている理由)
     assert_eq!(
@@ -164,6 +172,56 @@ fn コンボを解釈できる() {
 
     assert!(Combo::parse("^そんなキー").is_err());
     assert!(Combo::parse("").is_err());
+}
+
+#[test]
+fn 連続送出を解釈できる() {
+    let seq = Combo::parse_sequence("+{Space}^{x}{Down 2}+^{sc027}").unwrap();
+    assert_eq!(seq.len(), 4);
+    assert!(seq[0].mods == ModGroup::SHIFT && seq[0].key.code == vk::SPACE);
+    assert!(seq[1].mods == ModGroup::CTRL);
+    assert_eq!(seq[2].repeat, 2);
+    assert_eq!(seq[2].key.code, vk::DOWN);
+    assert!(seq[3].key.by_scan && seq[3].key.scan == 0x27);
+    assert!(seq[3].mods.contains(ModGroup::SHIFT) && seq[3].mods.contains(ModGroup::CTRL));
+
+    // 従来の 1 打鍵の書き方もそのまま通る
+    let one = Combo::parse_sequence("^F12").unwrap();
+    assert_eq!(one.len(), 1);
+    assert_eq!(one[0].repeat, 1);
+
+    // 先頭の {Blind} は全ステップに効く
+    let b = Combo::parse_sequence("{Blind}{Left}{Right}").unwrap();
+    assert_eq!(b.len(), 2);
+    assert!(b.iter().all(|c| c.blind));
+
+    // 1 打鍵の場所に連続送出は書けない
+    assert!(Combo::parse("+{Space}^{x}").is_err());
+
+    assert!(Combo::parse_sequence("+{Space").is_err());
+    assert!(Combo::parse_sequence("^").is_err());
+    assert!(Combo::parse_sequence("").is_err());
+}
+
+#[test]
+fn 文字は現在の配列のキーと修飾キーに展開される() {
+    // "_" は US でも JIS でも Shift 付きのどこかのキー (VkKeyScanW が配列から解決する)
+    let c = Combo::parse("^{_}").unwrap();
+    assert!(c.mods.contains(ModGroup::CTRL) && c.mods.contains(ModGroup::SHIFT));
+
+    // "-" は US でも JIS でも OemMinus
+    assert_eq!(Combo::parse("{-}").unwrap().key.code, 189);
+}
+
+#[test]
+fn excel用の割り当てが全部解釈できる() {
+    let cfg = Config::default_config();
+    let excel = cfg.app_hotkeys.get("EXCEL.EXE").unwrap();
+    assert!(!excel.is_empty());
+    for (trigger, action) in excel {
+        assert!(Combo::parse(trigger).is_ok(), "トリガー: {trigger}");
+        assert!(Combo::parse_sequence(action).is_ok(), "送出: {action}");
+    }
 }
 
 #[test]
