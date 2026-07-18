@@ -24,6 +24,9 @@ features = [
     "Win32_System_SystemInformation",
 ]
 
+[build-dependencies]
+embed-resource = "3"
+
 # 常駐アプリなのでサイズ最優先
 [profile.release]
 opt-level = "z"
